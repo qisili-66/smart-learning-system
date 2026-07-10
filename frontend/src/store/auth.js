@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { authApi, userApi } from '@/api/student'
-import { getStoredToken, setStoredToken } from '@/api/request'
+import { getStoredToken, setStoredRefreshToken, setStoredToken } from '@/api/request'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -17,10 +17,12 @@ export const useAuthStore = defineStore('auth', {
     setToken(token) {
       this.token = token || ''
       setStoredToken(this.token)
+      if (!this.token) setStoredRefreshToken('')
     },
     async login(payload) {
       const data = await authApi.login(payload)
       this.setToken(data?.token)
+      setStoredRefreshToken(data?.refreshToken)
       this.user = {
         userId: data?.userId,
         username: data?.username,

@@ -46,15 +46,22 @@ def _normalize_ollama_host(value: str | None) -> str:
 
 
 def _read_auth_json_key() -> str:
-    auth_path = Path(__file__).resolve().parents[1] / "auth.json"
-    if not auth_path.exists():
-        return ""
-    try:
-        data = json.loads(auth_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    value = data.get("OPENAI_API_KEY") or data.get("EXTERNAL_LLM_API_KEY") or ""
-    return str(value).strip()
+    project_root = Path(__file__).resolve().parents[2]
+    auth_paths = (
+        project_root / "auth.json",
+        project_root / "ai" / "auth.json",
+    )
+    for auth_path in auth_paths:
+        if not auth_path.exists():
+            continue
+        try:
+            data = json.loads(auth_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        value = data.get("OPENAI_API_KEY") or data.get("EXTERNAL_LLM_API_KEY") or ""
+        if value:
+            return str(value).strip()
+    return ""
 
 
 class Settings:

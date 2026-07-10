@@ -61,9 +61,7 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
         if (user == null || !passwordMatch.matched()) {
             throw new BusinessException(Constants.CODE_BAD_REQUEST, "username or password is incorrect");
         }
-        if (Constants.STATUS_DISABLED.equals(user.getStatus())) {
-            throw new BusinessException(Constants.CODE_FORBIDDEN, "account is disabled");
-        }
+        ensureUserEnabled(user);
         if (passwordMatch.legacyMd5()) {
             user.setPassword(passwordEncoder.encode(request.getPassword()));
             updateById(user);
@@ -73,11 +71,12 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
 
     @Override
     public LoginResponse refreshToken(String refreshToken) {
-        if (!jwtUtil.validateToken(refreshToken)) {
-            throw new BusinessException(Constants.CODE_UNAUTHORIZED, "token has expired, please login again");
+        if (!jwtUtil.validateRefreshToken(refreshToken)) {
+            throw new BusinessException(Constants.CODE_UNAUTHORIZED, "refresh token has expired, please login again");
         }
         Long userId = jwtUtil.getUserId(refreshToken);
         SysUser user = getRequiredUser(userId);
+        ensureUserEnabled(user);
         return buildLoginResponse(user);
     }
 
@@ -146,8 +145,9 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
     }
 
     private LoginResponse buildLoginResponse(SysUser user) {
-        String token = jwtUtil.generateToken(user.getUserId(), user.getRole());
-        return new LoginResponse(token, user.getUserId(), user.getUsername(), user.getRole(), safe(user.getRealName()));
+        String token = jwtUtil.generateAccessToken(user.getUserId(), user.getRole());
+        String refreshToken = jwtUtil.generateRefreshToken(user.getUserId(), user.getRole());
+        return new LoginResponse(token, refreshToken, user.getUserId(), user.getUsername(), user.getRole(), safe(user.getRealName()));
     }
 
     private SysUser getRequiredUser(Long userId) {
@@ -156,6 +156,12 @@ public class SysUserServiceImpl extends ServiceImpl<SysUserMapper, SysUser> impl
             throw new BusinessException(Constants.CODE_NOT_FOUND, "user not found");
         }
         return user;
+    }
+
+    private void ensureUserEnabled(SysUser user) {
+        if (Constants.STATUS_DISABLED.equals(user.getStatus())) {
+            throw new BusinessException(Constants.CODE_FORBIDDEN, "account is disabled");
+        }
     }
 
     private UserInfoResponse toUserInfoResponse(SysUser user) {

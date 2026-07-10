@@ -22,8 +22,6 @@ public class Constants {
     public static final Integer STATUS_DISABLED = 0;
 
     // ========== JWT 配置 ==========
-    public static final String JWT_SECRET = "SmartLearningSecretKey20260630ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
-    public static final long JWT_EXPIRE_TIME = 24 * 60 * 60 * 1000L; // 24小时，单位毫秒
     public static final String JWT_HEADER = "Authorization";
     public static final String JWT_PREFIX = "Bearer ";
 

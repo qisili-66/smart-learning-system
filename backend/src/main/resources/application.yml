@@ -48,3 +48,9 @@ ai:
     base-url: http://127.0.0.1:8000
     connect-timeout: 5000
     timeout: 300000
+
+security:
+  jwt:
+    secret: ${JWT_SECRET:change-this-local-development-secret-key-2026}
+    access-expire-ms: ${JWT_ACCESS_EXPIRE_MS:86400000}
+    refresh-expire-ms: ${JWT_REFRESH_EXPIRE_MS:604800000}

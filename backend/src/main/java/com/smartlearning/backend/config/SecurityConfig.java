@@ -67,7 +67,7 @@ public class SecurityConfig {
                                         Constants.CODE_FORBIDDEN, "无权限访问该接口"))
                 )
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/auth/register", "/auth/login").permitAll()
+                        .requestMatchers("/auth/register", "/auth/login", "/auth/refresh").permitAll()
                         .requestMatchers(KNIFE4J_WHITELIST).permitAll()
                         .requestMatchers("/admin/**").hasRole(Constants.SECURITY_ROLE_ADMIN)
                         .requestMatchers("/qa/**")
