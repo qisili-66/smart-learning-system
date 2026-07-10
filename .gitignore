@@ -1,1 +1,30 @@
-"# ºöÂÔÎÄ¼þ" 
+ï»¿# Runtime and editor files
+.vscode/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.jks
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# AI service runtime cache and logs
+ai/auth.json
+ai/.runtime/
+ai/pip/
+ai/**/*.log
+ai/**/__pycache__/
+
+# Java/Maven
+backend/target/
+backend/uploads/
+backend/exports/
+
+# OS
+.DS_Store
+Thumbs.db
