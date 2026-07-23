@@ -23,6 +23,9 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -30,12 +33,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
 public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan> implements StudyPlanService {
 
     private static final int TASK_STATUS_PENDING = 0;
+    private static final int MAX_PATH_STEPS = 4;
     private static final int TASK_STATUS_FINISHED = 1;
     private static final int TASK_TYPE_LEARN = 1;
     private static final int TASK_TYPE_PRACTICE = 2;
@@ -46,6 +51,15 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
     private static final String STEP_WRONG_REVIEW = "wrong_review";
     private static final String STEP_RESOURCE_STUDY = "resource_study";
     private static final String STEP_STAGE_TEST = "stage_test";
+    private static final String SMARTEDU_SEARCH_BASE = "https://basic.smartedu.cn/search?keyword=";
+    private static final Set<String> PLACEHOLDER_RESOURCE_HOSTS = Set.of("example.com", "www.example.com", "localhost", "127.0.0.1");
+    private static final Map<Integer, String> RESOURCE_TYPE_KEYWORDS = Map.of(
+            1, "微课",
+            2, "课件",
+            3, "练习",
+            4, "思维导图",
+            5, "考点手册"
+    );
 
     private final StudyTaskService studyTaskService;
     private final LearningResourceService learningResourceService;
@@ -76,7 +90,10 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
                                                   Map<String, Object> metrics) {
         int safeLimit = limit == null ? 8 : Math.max(1, Math.min(limit, 20));
         int targetDifficulty = targetDifficulty(metrics);
-        List<String> points = normalizePoints(weakPoints);
+        List<String> points = normalizePoints(weakPoints).stream()
+                .filter(point -> pointMatchesSubject(point, subject))
+                .limit(3)
+                .toList();
 
         List<LearningResource> resources = learningResourceService.lambdaQuery()
                 .eq(StringUtils.hasText(subject), LearningResource::getSubject, subject)
@@ -285,7 +302,7 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
     }
 
     private Map<String, Object> generateAiPath(Long userId, StudyPlan plan, Map<String, Object> request) {
-        List<String> weakPoints = normalizePoints(castStringList(request.get("weakPoints")));
+        List<String> weakPoints = planWeakPoints(plan, request);
         Map<String, Object> metrics = castMap(request.get("metrics"));
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("planName", safe(plan.getPlanName()));
@@ -310,6 +327,11 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         if (!(steps instanceof List<?> list) || list.isEmpty()) {
             return fallbackPath(plan, weakPoints, "AI未返回有效步骤");
         }
+        List<Map<String, Object>> compactSteps = compactPathSteps(plan, castMapList(steps));
+        if (compactSteps.isEmpty()) {
+            return fallbackPath(plan, weakPoints, "AI返回步骤与当前学科不匹配");
+        }
+        aiPath.put("steps", compactSteps);
         return aiPath;
     }
 
@@ -363,20 +385,21 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
     }
 
     private Map<String, Object> fallbackPath(StudyPlan plan, List<String> weakPoints, String reason) {
-        List<String> points = normalizePoints(weakPoints);
+        List<String> points = normalizePoints(weakPoints).stream()
+                .filter(point -> pointMatchesPlan(point, plan, split(plan.getTargetDesc())))
+                .limit(3)
+                .toList();
         if (points.isEmpty()) {
             points = split(plan.getTargetDesc());
         }
         if (points.isEmpty()) {
-            points = List.of("基础知识");
+            points = List.of(defaultSubjectPoint(plan.getSubject()));
         }
         String point = points.get(0);
-        String second = points.size() > 1 ? points.get(1) : point;
         List<Map<String, Object>> steps = new ArrayList<>();
         steps.add(step(STEP_DIAGNOSTIC, point + "基础诊断", point, 70, 12, 1, "先确认当前薄弱程度。"));
         steps.add(step(STEP_PRACTICE, point + "专项练习", point, 80, 18, 1, "通过同类题巩固核心方法。"));
         steps.add(step(STEP_WRONG_REVIEW, point + "错题复盘", point, 80, 12, 2, "复盘错误原因。"));
-        steps.add(step(STEP_RESOURCE_STUDY, second + "资源学习", second, 0, 15, 2, "补齐概念和例题理解。"));
         steps.add(step(STEP_STAGE_TEST, point + "阶段测评", point, 85, 20, 3, "判断是否进入下一轮。"));
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("provider", "rule_fallback");
@@ -651,12 +674,104 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         item.put("resourceType", resource.getResourceType());
         item.put("subject", safe(resource.getSubject()));
         item.put("knowledgePoint", point);
-        item.put("fileUrl", safe(resource.getFileUrl()));
+        item.put("fileUrl", sanitizedResourceUrl(resource));
         item.put("priority", weakIndex + 1);
         item.put("inferredDifficulty", inferredDifficulty);
         item.put("difficultyGap", Math.abs(inferredDifficulty - targetDifficulty));
         item.put("matchReason", weakIndex < 99 ? "命中薄弱知识点" : "同学科补充资源");
         return item;
+    }
+
+    private String sanitizedResourceUrl(LearningResource resource) {
+        if (resource == null) {
+            return "";
+        }
+        if (shouldReplaceWithSmartEduSearch(resource)) {
+            return smartEduResourceUrl(resource);
+        }
+        return safe(resource.getFileUrl()).trim();
+    }
+
+    private boolean shouldReplaceWithSmartEduSearch(LearningResource resource) {
+        String url = resource.getFileUrl();
+        if (isPlaceholderResourceUrl(url)) {
+            return true;
+        }
+        if (!StringUtils.hasText(url) || !url.startsWith("https://basic.smartedu.cn")) {
+            return false;
+        }
+        if (!url.contains("/search?keyword=")) {
+            return true;
+        }
+        String keyword = normalizedText(searchKeyword(url));
+        String point = normalizedText(firstKnowledgePoint(resource.getKnowledgePoint()));
+        if (StringUtils.hasText(point) && !keyword.contains(point)) {
+            return true;
+        }
+        return keyword.equals(normalizedText(smartEduSubjectKeyword(resource.getSubject())));
+    }
+
+    private boolean isPlaceholderResourceUrl(String url) {
+        if (!StringUtils.hasText(url)) {
+            return false;
+        }
+        try {
+            String host = URI.create(url.trim()).getHost();
+            return host != null && PLACEHOLDER_RESOURCE_HOSTS.contains(host.toLowerCase());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private String smartEduResourceUrl(LearningResource resource) {
+        String keyword = smartEduSubjectKeyword(resource.getSubject());
+        String point = firstKnowledgePoint(resource.getKnowledgePoint());
+        if (StringUtils.hasText(point)) {
+            keyword += point;
+        }
+        String typeKeyword = RESOURCE_TYPE_KEYWORDS.get(resource.getResourceType());
+        if (StringUtils.hasText(typeKeyword)) {
+            keyword += typeKeyword;
+        }
+        return SMARTEDU_SEARCH_BASE + URLEncoder.encode(keyword, StandardCharsets.UTF_8);
+    }
+
+    private String smartEduSubjectKeyword(String subject) {
+        return "初中" + (StringUtils.hasText(subject) ? subject.trim() : "学习资源");
+    }
+
+    private String firstKnowledgePoint(String knowledgePoint) {
+        if (!StringUtils.hasText(knowledgePoint)) {
+            return "";
+        }
+        return List.of(knowledgePoint.split("[、,，;；|/\\s]+"))
+                .stream()
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .findFirst()
+                .orElse("");
+    }
+
+    private String searchKeyword(String url) {
+        try {
+            String query = URI.create(url).getRawQuery();
+            if (!StringUtils.hasText(query)) {
+                return "";
+            }
+            for (String part : query.split("&")) {
+                int index = part.indexOf('=');
+                if (index > 0 && "keyword".equals(part.substring(0, index))) {
+                    return java.net.URLDecoder.decode(part.substring(index + 1), StandardCharsets.UTF_8);
+                }
+            }
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
+        return "";
+    }
+
+    private String normalizedText(String value) {
+        return StringUtils.hasText(value) ? value.replaceAll("\\s+", "") : "";
     }
 
     private Long pickResource(List<Map<String, Object>> resources, String point, Integer taskType) {
@@ -940,6 +1055,103 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         } catch (RuntimeException e) {
             return defaultValue;
         }
+    }
+
+    private List<Map<String, Object>> compactPathSteps(StudyPlan plan, List<Map<String, Object>> rawSteps) {
+        if (rawSteps == null || rawSteps.isEmpty()) {
+            return List.of();
+        }
+        List<String> targetPoints = split(plan.getTargetDesc());
+        List<Map<String, Object>> filtered = rawSteps.stream()
+                .filter(step -> StringUtils.hasText(normalizeStepType(step.get("stepType"))))
+                .filter(step -> pointMatchesPlan(safeObject(step.get("knowledgePoint"), ""), plan, targetPoints))
+                .toList();
+        Map<String, Map<String, Object>> byType = new LinkedHashMap<>();
+        for (String type : List.of(STEP_DIAGNOSTIC, STEP_PRACTICE, STEP_WRONG_REVIEW, STEP_STAGE_TEST, STEP_RESOURCE_STUDY)) {
+            filtered.stream()
+                    .filter(step -> type.equals(normalizeStepType(step.get("stepType"))))
+                    .findFirst()
+                    .ifPresent(step -> byType.put(type, step));
+            if (byType.size() >= MAX_PATH_STEPS) {
+                break;
+            }
+        }
+        if (byType.isEmpty()) {
+            return filtered.stream().limit(MAX_PATH_STEPS).toList();
+        }
+        return byType.values().stream().limit(MAX_PATH_STEPS).toList();
+    }
+
+    private List<String> planWeakPoints(StudyPlan plan, Map<String, Object> request) {
+        List<String> targetPoints = split(plan.getTargetDesc());
+        List<String> scoped = normalizePoints(castStringList(request.get("weakPoints"))).stream()
+                .filter(point -> pointMatchesPlan(point, plan, targetPoints))
+                .limit(3)
+                .toList();
+        if (!scoped.isEmpty()) {
+            return scoped;
+        }
+        if (!targetPoints.isEmpty()) {
+            return targetPoints.stream().limit(3).toList();
+        }
+        return List.of(defaultSubjectPoint(plan.getSubject()));
+    }
+
+    private boolean pointMatchesPlan(String point, StudyPlan plan, List<String> targetPoints) {
+        String normalizedPoint = safe(point).trim();
+        if (!StringUtils.hasText(normalizedPoint)) {
+            return false;
+        }
+        if ("基础知识".equals(normalizedPoint) || normalizedPoint.endsWith("基础知识")) {
+            return true;
+        }
+        if (targetPoints.stream().anyMatch(target -> normalizedPoint.contains(target) || target.contains(normalizedPoint))) {
+            return true;
+        }
+        String subject = safe(plan == null ? "" : plan.getSubject()).trim();
+        return pointMatchesSubject(normalizedPoint, subject);
+    }
+
+    private boolean pointMatchesSubject(String point, String subject) {
+        String normalizedPoint = safe(point).trim();
+        if (!StringUtils.hasText(normalizedPoint)) {
+            return false;
+        }
+        if ("基础知识".equals(normalizedPoint) || normalizedPoint.endsWith("基础知识")) {
+            return true;
+        }
+        subject = safe(subject).trim();
+        if (!StringUtils.hasText(subject)) {
+            return true;
+        }
+        if (normalizedPoint.contains(subject)) {
+            return true;
+        }
+        List<String> vocabulary = subjectVocabulary(subject);
+        if (vocabulary.isEmpty()) {
+            return false;
+        }
+        return vocabulary.stream().anyMatch(normalizedPoint::contains);
+    }
+
+    private List<String> subjectVocabulary(String subject) {
+        if (!StringUtils.hasText(subject)) {
+            return List.of();
+        }
+        if (subject.contains("数学")) return List.of("数学", "函数", "方程", "几何", "代数", "概率", "统计", "勾股", "圆", "三角");
+        if (subject.contains("语文")) return List.of("语文", "阅读", "作文", "文言", "诗词", "病句", "修辞", "说明文", "议论文");
+        if (subject.contains("英语")) return List.of("英语", "语法", "阅读", "写作", "听力", "词汇", "时态", "从句");
+        if (subject.contains("物理")) return List.of("物理", "力", "电", "光", "热", "声", "压强", "浮力", "电路");
+        if (subject.contains("化学")) return List.of("化学", "元素", "化合", "溶液", "酸", "碱", "盐", "反应", "实验");
+        if (subject.contains("生物")) return List.of("生物", "细胞", "遗传", "生态", "植物", "动物", "人体", "免疫");
+        if (subject.contains("历史")) return List.of("历史", "朝代", "革命", "战争", "制度", "文化", "近代", "古代");
+        if (subject.contains("地理")) return List.of("地理", "地图", "气候", "地形", "河流", "人口", "区域", "经纬");
+        if (subject.contains("道德") || subject.contains("法治") || subject.contains("政治")) return List.of("道德", "法治", "法律", "宪法", "责任", "权利", "义务", "国家", "社会", "公民", "政治");
+        return List.of(subject);
+    }
+
+    private String defaultSubjectPoint(String subject) {
+        return StringUtils.hasText(subject) ? subject.trim() + "基础知识" : "基础知识";
     }
 
     private List<String> normalizePoints(List<String> weakPoints) {

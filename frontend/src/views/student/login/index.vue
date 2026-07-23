@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/store/auth'
 import { GRADES } from '@/utils/format'
+import projectIcon from '@/assets/project-icon.svg'
 
 const router = useRouter()
 const route = useRoute()
@@ -34,40 +35,40 @@ const registerForm = reactive({
 
 const messages = {
   zh: {
-    brand: 'Smart Learning',
-    login: '\u767b\u5f55',
-    register: '\u6ce8\u518c',
-    noAccount: '\u6ca1\u6709\u8d26\u53f7\uff1f',
-    hasAccount: '\u5df2\u6709\u8d26\u53f7\uff1f',
-    username: '\u7528\u6237\u540d',
-    account: '\u8d26\u53f7',
-    password: '\u5bc6\u7801',
-    realName: '\u59d3\u540d',
-    phone: '\u624b\u673a\u53f7',
-    grade: '\u5b66\u6bb5',
-    remember: '\u8bb0\u4f4f\u6211',
-    forgot: '\u5fd8\u8bb0\u5bc6\u7801\uff1f',
-    agree: '\u540c\u610f\u7528\u6237\u534f\u8bae\u548c\u9690\u79c1\u653f\u7b56',
-    submitLogin: '\u767b\u5f55',
-    submitRegister: '\u6ce8\u518c\u5e76\u767b\u5f55',
-    language: '\u8bed\u8a00',
-    theme: '\u4e3b\u9898',
-    zhLabel: '\u7b80\u4f53\u4e2d\u6587',
+    brand: '智慧学习辅助系统',
     enLabel: 'English',
-    light: '\u6d45\u8272',
-    dark: '\u6df1\u8272',
-    requiredAccount: '\u8bf7\u8f93\u5165\u8d26\u53f7',
-    requiredPassword: '\u8bf7\u8f93\u5165\u5bc6\u7801',
-    setPassword: '\u8bf7\u8bbe\u7f6e\u5bc6\u7801',
-    accountLength: '\u8d26\u53f7\u957f\u5ea6\u4e3a 4-20 \u4f4d',
-    passwordLength: '\u5bc6\u7801\u957f\u5ea6\u4e3a 6-20 \u4f4d',
-    phoneInvalid: '\u8bf7\u8f93\u5165 11 \u4f4d\u624b\u673a\u53f7',
-    agreeTip: '\u8bf7\u5148\u540c\u610f\u7528\u6237\u534f\u8bae',
-    loginOk: '\u767b\u5f55\u6210\u529f',
-    registerOk: '\u6ce8\u518c\u6210\u529f\uff0c\u5df2\u4e3a\u4f60\u767b\u5f55'
+    login: '登录',
+    register: '注册',
+    noAccount: '没有账号？',
+    hasAccount: '已有账号？',
+    username: '用户名',
+    account: '账号',
+    password: '密码',
+    realName: '姓名',
+    phone: '手机号',
+    grade: '学段',
+    remember: '记住我',
+    forgot: '忘记密码？',
+    agree: '同意用户协议和隐私政策',
+    submitLogin: '登录',
+    submitRegister: '注册并登录',
+    language: '语言',
+    theme: '主题',
+    zhLabel: '简体中文',
+    light: '浅色',
+    dark: '深色',
+    requiredAccount: '请输入账号',
+    requiredPassword: '请输入密码',
+    setPassword: '请设置密码',
+    accountLength: '账号长度为 4-20 位',
+    passwordLength: '密码长度为 6-20 位',
+    phoneInvalid: '请输入 11 位手机号',
+    agreeTip: '请先同意用户协议',
+    loginOk: '登录成功',
+    registerOk: '注册成功，已为你登录'
   },
   en: {
-    brand: 'Smart Learning',
+    brand: 'AI Learning Assistant',
     login: 'Log in',
     register: 'Sign up',
     noAccount: 'No account?',
@@ -195,7 +196,7 @@ onMounted(applyPreferences)
     <header class="auth-header">
       <router-link class="auth-brand" to="/login">
         <span class="auth-brand-mark">
-          <el-icon><Reading /></el-icon>
+          <img :src="projectIcon" alt="" />
         </span>
         <strong>{{ text.brand }}</strong>
       </router-link>
@@ -356,10 +357,17 @@ onMounted(applyPreferences)
   justify-content: center;
   width: 44px;
   height: 44px;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 12px;
   background: var(--primary-soft);
   font-size: 22px;
+}
+
+.auth-brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .auth-brand strong {

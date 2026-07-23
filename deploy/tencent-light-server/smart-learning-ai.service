@@ -1,0 +1,18 @@
+[Unit]
+Description=Smart Learning FastAPI AI Service
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/smart-learning/ai
+EnvironmentFile=/opt/smart-learning/config/smart-learning.env
+ExecStart=/opt/smart-learning/ai/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -26,6 +26,25 @@ const progress = computed(() => {
   if (!questions.value.length) return 0
   return Math.round((answeredCount.value / questions.value.length) * 100)
 })
+const paperTotalScore = computed(() => Number(currentAssessment.value?.totalScore || 100))
+const paperSections = computed(() => {
+  const grouped = new Map()
+  questions.value.forEach((question) => {
+    const title = question.paperSectionTitle || QUESTION_TYPES[question.questionType] || '题目'
+    if (!grouped.has(title)) {
+      grouped.set(title, {
+        title,
+        note: question.paperSectionNote || '',
+        items: [],
+        score: 0
+      })
+    }
+    const section = grouped.get(title)
+    section.items.push(question)
+    section.score += Number(question.maxScore || 0)
+  })
+  return Array.from(grouped.values())
+})
 
 function answerValue(question) {
   const value = answers[question.questionId]
@@ -114,8 +133,8 @@ async function submitAssessment() {
         questionId: question.questionId,
         userAnswer: answerValue(question),
         questionUseSeconds: questionSeconds(question.questionId)
-      })),
-      totalScore: 100,
+      })), 
+      totalScore: paperTotalScore.value,
       useTime: 0
     })
     await assessmentApi.report(currentAssessment.value.assessmentId)
@@ -153,7 +172,7 @@ onBeforeUnmount(() => {
           {{ ASSESSMENT_TYPES[currentAssessment.assessmentType] || '测评' }} ·
           {{ currentAssessment.subject || '全科' }} ·
           {{ difficultyLabel(currentAssessment.difficulty) }} ·
-          {{ currentAssessment.knowledgeScope || '综合知识点' }}
+          {{ currentAssessment.knowledgeScope || '综合知识点' }} · 满分 {{ paperTotalScore }} 分
         </p>
         <p v-else>正在加载测评题目。</p>
       </div>
@@ -177,45 +196,56 @@ onBeforeUnmount(() => {
         <strong>{{ answeredCount }}/{{ questions.length }}</strong>
       </div>
       <el-progress :percentage="progress" :stroke-width="10" />
+      <div class="score-total">满分 {{ paperTotalScore }} 分</div>
     </section>
 
     <section v-loading="loading" class="paper panel panel-body">
       <div v-if="questions.length" class="question-list">
-        <article
-          v-for="(question, index) in questions"
-          :key="question.questionId"
-          class="question-card"
-          :class="{ active: activeQuestionId === question.questionId }"
-          @click="activateQuestion(question.questionId)"
-          @focusin="activateQuestion(question.questionId)"
-        >
-          <div class="question-meta">
-            <el-tag>{{ index + 1 }}</el-tag>
-            <span>{{ QUESTION_TYPES[question.questionType] || '题目' }}</span>
-            <span>{{ question.knowledgePoint || '未标注知识点' }}</span>
-            <span>用时 {{ formatDuration(questionSeconds(question.questionId)) }}</span>
+        <section v-for="section in paperSections" :key="section.type" class="paper-section">
+            <div class="section-head">
+              <div>
+                <h2>{{ section.title }}</h2>
+                <p v-if="section.note">{{ section.note }}</p>
+              </div>
+            <strong>{{ section.items.length }} 题 / {{ section.score }} 分</strong>
           </div>
-          <h2>{{ question.questionText }}</h2>
-          <el-checkbox-group
-            v-if="Number(question.questionType) === 2 && question.options?.length"
-            v-model="answers[question.questionId]"
+          <article
+            v-for="question in section.items"
+            :key="question.questionId"
+            class="question-card"
+            :class="{ active: activeQuestionId === question.questionId }"
+            @click="activateQuestion(question.questionId)"
+            @focusin="activateQuestion(question.questionId)"
           >
-            <el-checkbox v-for="option in question.options" :key="option" :label="option" />
-          </el-checkbox-group>
-          <el-radio-group
-            v-else-if="question.options?.length"
-            v-model="answers[question.questionId]"
-          >
-            <el-radio v-for="option in question.options" :key="option" :label="option" />
-          </el-radio-group>
-          <el-input
-            v-else
-            v-model="answers[question.questionId]"
-            type="textarea"
-            :rows="3"
-            placeholder="输入你的答案"
-          />
-        </article>
+            <div class="question-meta">
+              <el-tag>{{ questions.findIndex((item) => item.questionId === question.questionId) + 1 }}</el-tag>
+              <span>{{ QUESTION_TYPES[question.questionType] || '题目' }}</span>
+              <span>{{ question.knowledgePoint || '未标注知识点' }}</span>
+              <span>用时 {{ formatDuration(questionSeconds(question.questionId)) }}</span>
+              <strong>{{ question.maxScore || 0 }} 分</strong>
+            </div>
+            <h3>{{ question.questionText }}</h3>
+            <el-checkbox-group
+              v-if="Number(question.questionType) === 2 && question.options?.length"
+              v-model="answers[question.questionId]"
+            >
+              <el-checkbox v-for="option in question.options" :key="option" :label="option" />
+            </el-checkbox-group>
+            <el-radio-group
+              v-else-if="question.options?.length"
+              v-model="answers[question.questionId]"
+            >
+              <el-radio v-for="option in question.options" :key="option" :label="option" />
+            </el-radio-group>
+            <el-input
+              v-else
+              v-model="answers[question.questionId]"
+              type="textarea"
+              :rows="Number(question.questionType) === 4 ? 6 : 3"
+              placeholder="输入你的答案"
+            />
+          </article>
+        </section>
       </div>
 
       <el-empty v-else description="暂无题目">
@@ -234,7 +264,7 @@ onBeforeUnmount(() => {
 
 .paper-status {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: 160px minmax(0, 1fr) auto;
   align-items: center;
   gap: 18px;
   padding: 18px;
@@ -252,6 +282,15 @@ onBeforeUnmount(() => {
   line-height: 1;
 }
 
+.score-total {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 700;
+}
+
 .paper {
   display: flex;
   flex-direction: column;
@@ -261,7 +300,37 @@ onBeforeUnmount(() => {
 .question-list {
   display: flex;
   flex-direction: column;
+  gap: 22px;
+}
+
+.paper-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 14px;
+  padding: 12px 0 8px;
+  border-bottom: 2px solid var(--text);
+}
+
+.section-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.section-head p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.section-head strong {
+  white-space: nowrap;
 }
 
 .question-card {
@@ -286,15 +355,20 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.question-card h2 {
+.question-card h3 {
   margin: 0;
   font-size: 17px;
   line-height: 1.55;
+  font-weight: 650;
 }
 
 @media (max-width: 720px) {
   .paper-status {
     grid-template-columns: 1fr;
+  }
+
+  .section-head {
+    flex-direction: column;
   }
 }
 </style>

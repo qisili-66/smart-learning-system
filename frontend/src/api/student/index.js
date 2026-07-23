@@ -15,6 +15,7 @@ export const userApi = {
 export const profileApi = {
   my: () => http.get('/user-profiles/my'),
   updateMy: (data) => http.put('/user-profiles/my', data),
+  refresh: () => http.post('/user-profiles/refresh'),
   weakPoints: (params) => http.get('/user-profiles/weak-points', { params })
 }
 
@@ -117,5 +118,7 @@ export const assessmentApi = {
 export const personalDataApi = {
   overview: () => http.get('/personal-data/overview'),
   export: () => http.get('/personal-data/export'),
-  clear: (data) => http.delete('/personal-data/clear', { data })
+  clear: (data) => http.delete('/personal-data/clear', { data }),
+  exportLogs: () => http.get('/personal-data/export-logs'),
+  clearLogs: () => http.get('/personal-data/clear-logs')
 }

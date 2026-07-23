@@ -54,3 +54,8 @@ export const adminAiApi = {
   updateQaRules: (data) => http.put('/admin/ai/qa-rules', data),
   updateRecommendConfig: (data) => http.put('/admin/ai/recommend-config', data)
 }
+
+export const adminPersonalDataAuditApi = {
+  exportLogs: (params) => http.get('/admin/audits/personal-data/export-logs', { params }),
+  clearLogs: (params) => http.get('/admin/audits/personal-data/clear-logs', { params })
+}

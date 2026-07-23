@@ -1,0 +1,20 @@
+[Unit]
+Description=Smart Learning Spring Boot Backend
+After=network.target mysql.service redis-server.service smart-learning-ai.service
+Wants=smart-learning-ai.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/smart-learning/backend
+EnvironmentFile=/opt/smart-learning/config/smart-learning.env
+ExecStart=/usr/bin/java -Xms256m -Xmx768m -jar /opt/smart-learning/backend/app.jar
+Restart=always
+RestartSec=8
+SuccessExitStatus=143
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

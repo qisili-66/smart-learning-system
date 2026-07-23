@@ -48,4 +48,4 @@ class LearningPathRequest(BaseModel):
     wrongStats: Dict[str, Any] = Field(default_factory=dict, description="错题统计")
     recentAssessments: List[Dict[str, Any]] = Field(default_factory=list, description="最近测评")
     resources: List[Dict[str, Any]] = Field(default_factory=list, description="可用资源")
-    provider: Optional[str] = Field(default=None, description="external/ollama/auto")
+    provider: Optional[str] = Field(default=None, description="兼容旧请求字段；服务端统一调用 OpenAI 兼容 API")

@@ -1,10 +1,12 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { qaApi } from '@/api/student'
 import { SUBJECTS } from '@/utils/format'
 
 const STORAGE_KEY = 'smart_learning_ai_sessions'
+const route = useRoute()
 const subject = ref('数学')
 const input = ref('')
 const sending = ref(false)
@@ -19,6 +21,7 @@ const voiceUrl = ref('')
 const recognizedText = ref('')
 const correctedText = ref('')
 const correctedTouched = ref(false)
+const speechError = ref('')
 const speechSupported = ref(
   typeof window !== 'undefined' && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition)
 )
@@ -31,6 +34,7 @@ let asrFinalText = ''
 
 const activeSession = computed(() => sessions.value.find((item) => item.id === activeId.value))
 const messages = computed(() => activeSession.value?.messages || [])
+const speechLanguage = computed(() => (subject.value === '英语' ? 'en-US' : 'zh-CN'))
 
 function welcomeMessage() {
   return {
@@ -304,6 +308,7 @@ async function startRecording() {
     return
   }
   clearVoiceDraft()
+  speechError.value = ''
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
     audioChunks = []
@@ -322,6 +327,7 @@ async function startRecording() {
     recording.value = true
     startRecognition()
   } catch (error) {
+    speechError.value = error?.message || '无法启动录音，请检查浏览器麦克风权限'
     ElMessage.error(error?.message || '无法启动录音')
     stopMediaStream()
   }
@@ -336,12 +342,16 @@ function stopRecording() {
 }
 
 function startRecognition() {
-  if (!speechSupported.value) return
+  if (!speechSupported.value) {
+    speechError.value = '当前浏览器不支持语音转文字，请在录音后手动输入识别文本'
+    return
+  }
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition
   recognition = new Recognition()
-  recognition.lang = 'zh-CN'
+  recognition.lang = speechLanguage.value
   recognition.continuous = true
   recognition.interimResults = true
+  speechError.value = ''
   asrFinalText = ''
   recognizedText.value = ''
   correctedText.value = ''
@@ -351,12 +361,12 @@ function startRecognition() {
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const text = event.results[index][0]?.transcript || ''
       if (event.results[index].isFinal) {
-        asrFinalText += text
+        asrFinalText = `${asrFinalText} ${text}`.trim()
       } else {
-        interim += text
+        interim = `${interim} ${text}`.trim()
       }
     }
-    recognizedText.value = `${asrFinalText}${interim}`.trim()
+    recognizedText.value = `${asrFinalText} ${interim}`.trim()
     if (!correctedTouched.value) {
       correctedText.value = recognizedText.value
     }
@@ -364,11 +374,19 @@ function startRecognition() {
   recognition.onend = () => {
     recognizing.value = false
   }
+  recognition.onerror = (event) => {
+    recognizing.value = false
+    speechError.value = speechErrorMessage(event?.error)
+  }
+  recognition.onnomatch = () => {
+    speechError.value = '没有识别到清晰语音，请靠近麦克风重试，或手动输入识别文本'
+  }
   try {
     recognition.start()
     recognizing.value = true
-  } catch {
+  } catch (error) {
     recognizing.value = false
+    speechError.value = error?.message || '语音转文字启动失败，请检查浏览器权限或手动输入文本'
   }
 }
 
@@ -384,6 +402,18 @@ function stopRecognition() {
   recognizing.value = false
 }
 
+function speechErrorMessage(error) {
+  const messages = {
+    'not-allowed': '麦克风或语音识别权限被拒绝，请在浏览器地址栏允许麦克风权限',
+    'service-not-allowed': '浏览器语音识别服务不可用，请换用 Chrome/Edge 或手动输入文本',
+    'network': '语音识别服务连接失败，请检查网络后重试，或手动输入文本',
+    'no-speech': '没有识别到语音，请靠近麦克风重试，或手动输入文本',
+    'audio-capture': '没有检测到可用麦克风，请检查录音设备',
+    'language-not-supported': '当前语音识别语言不可用，请切换学科或手动输入文本'
+  }
+  return messages[error] || '语音转文字失败，请重试或手动输入识别文本'
+}
+
 function stopMediaStream() {
   mediaStream?.getTracks?.().forEach((track) => track.stop())
   mediaStream = null
@@ -396,6 +426,10 @@ async function sendVoice() {
   }
   const fixedText = correctedText.value.trim()
   const rawText = recognizedText.value.trim()
+  if (!fixedText && !rawText) {
+    ElMessage.warning('请先完成语音转文字，或在文本框手动输入识别内容')
+    return
+  }
   const file = new File([voiceBlob.value], `voice-${Date.now()}.webm`, { type: voiceBlob.value.type || 'audio/webm' })
   appendMessage({
     role: 'user',
@@ -448,6 +482,7 @@ function clearVoiceDraft(revoke = true) {
   recognizedText.value = ''
   correctedText.value = ''
   correctedTouched.value = false
+  speechError.value = ''
 }
 
 async function confirmFullAnswer(message, index) {
@@ -502,6 +537,17 @@ function metricValue(value, suffix = '') {
 }
 
 onMounted(loadSessions)
+
+watch(
+  () => route.query.subject,
+  (value) => {
+    const nextSubject = value?.toString()
+    if (nextSubject && SUBJECTS.includes(nextSubject)) {
+      subject.value = nextSubject
+    }
+  },
+  { immediate: true }
+)
 
 onBeforeUnmount(() => {
   stopRecognition()
@@ -574,6 +620,7 @@ onBeforeUnmount(() => {
 
         <div v-if="voiceBlob || recognizedText || recording" class="voice-draft">
           <audio v-if="voiceUrl" class="audio-player" :src="voiceUrl" controls />
+          <el-alert v-if="speechError" :title="speechError" type="warning" show-icon :closable="false" />
           <el-input
             v-model="correctedText"
             type="textarea"
@@ -584,6 +631,7 @@ onBeforeUnmount(() => {
           <div class="voice-actions">
             <el-tag v-if="recognizing" type="warning">识别中</el-tag>
             <el-tag v-else-if="!speechSupported" type="info">可手动输入文本</el-tag>
+            <el-tag v-else type="success">{{ speechLanguage }}</el-tag>
             <el-button size="small" :disabled="!voiceBlob" @click="sendVoice">发送语音</el-button>
             <el-button size="small" text @click="clearVoiceDraft">清空</el-button>
           </div>

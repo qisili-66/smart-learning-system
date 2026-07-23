@@ -263,7 +263,7 @@ onMounted(async () => {
         <el-pagination
           v-model:current-page="filters.pageNum"
           v-model:page-size="filters.pageSize"
-          small
+          size="small"
           layout="prev, pager, next"
           :total="pageTotal(history)"
           @change="loadHistory"

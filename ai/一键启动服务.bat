@@ -5,7 +5,8 @@ cd /d "%~dp0"
 
 set "PY_CMD="
 set "PY312=%LocalAppData%\Programs\Python\Python312\python.exe"
-set "OLLAMA_HOST=http://127.0.0.1:11434"
+if not defined EXTERNAL_LLM_MODEL set "EXTERNAL_LLM_MODEL=qwen3.7-max"
+if not defined EXTERNAL_LLM_BASE_URL set "EXTERNAL_LLM_BASE_URL=https://ws-2gca4xhi5wbpqj12.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 set "USERPROFILE=%CD%\.runtime"
 set "HOME=%CD%\.runtime"
 set "XDG_CACHE_HOME=%CD%\.runtime\.cache"
@@ -38,14 +39,14 @@ echo [Smart Learning AI] Python command: %PY_CMD%
 if errorlevel 1 goto bad_python
 
 echo [Smart Learning AI] Checking dependencies...
-%PY_CMD% -c "import fastapi, uvicorn, ollama; import main; print('Dependencies OK')"
+%PY_CMD% -c "import fastapi, uvicorn; import main; print('Dependencies OK')"
 if not errorlevel 1 goto start_service
 
 echo [Smart Learning AI] Dependencies are missing or incomplete.
 echo [Smart Learning AI] Installing dependencies once...
 %PY_CMD% -m pip install -r requirements.txt
 if errorlevel 1 goto pip_failed
-%PY_CMD% -c "import fastapi, uvicorn, ollama; import main; print('Dependencies OK')"
+%PY_CMD% -c "import fastapi, uvicorn; import main; print('Dependencies OK')"
 if errorlevel 1 goto pip_failed
 
 :start_service
@@ -56,6 +57,7 @@ if not errorlevel 1 goto already_running
 echo [Smart Learning AI] Starting FastAPI service...
 echo [Smart Learning AI] Health: http://127.0.0.1:8000/health
 echo [Smart Learning AI] Docs:   http://127.0.0.1:8000/docs
+if not defined EXTERNAL_LLM_API_KEY echo [Smart Learning AI] WARNING: EXTERNAL_LLM_API_KEY is not set. AI calls will fall back where possible.
 echo [Smart Learning AI] Keep this window open while using AI features.
 %PY_CMD% -m uvicorn main:app --host 127.0.0.1 --port 8000
 goto end

@@ -532,9 +532,7 @@ onMounted(loadPlans)
           </el-form-item>
           <el-form-item label="AI 模式">
             <el-select v-model="form.provider" class="full" :disabled="Boolean(editingId)">
-              <el-option label="外部 API" value="external" />
-              <el-option label="Ollama 本地" value="ollama" />
-              <el-option label="自动兜底" value="auto" />
+              <el-option label="OpenAI API" value="external" />
             </el-select>
           </el-form-item>
         </div>

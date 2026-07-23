@@ -12,6 +12,7 @@ import {
   pageTotal,
   resourceTypeLabel
 } from '@/utils/format'
+import { isPlaceholderResourceUrl, resolveResourceUrl, smartEduSubjectUrl } from '@/utils/resourceLinks'
 
 const route = useRoute()
 const loading = ref(false)
@@ -120,11 +121,12 @@ async function openDetail(resource) {
 }
 
 function openResource(resource = currentResource.value) {
-  if (!resource?.fileUrl) {
-    ElMessage.info('当前资源暂无文件地址，可在后台资源管理中补充')
+  const url = resolveResourceUrl(resource)
+  if (!url) {
+    ElMessage.info(isPlaceholderResourceUrl(resource?.fileUrl) ? '当前资源地址是开发占位链接，已拦截打开' : '当前资源暂无文件地址，可在后台资源管理中补充')
     return
   }
-  window.open(resource.fileUrl, '_blank', 'noopener')
+  window.open(url, '_blank', 'noopener')
 }
 
 function applyRecommend(item) {
@@ -175,6 +177,17 @@ watch(
 
     <section class="panel panel-body">
       <div class="toolbar resource-toolbar">
+        <div class="subject-shortcuts" aria-label="初中学科资源快捷入口">
+          <a
+            v-for="subject in SUBJECTS"
+            :key="subject"
+            :href="smartEduSubjectUrl(subject)"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            初中{{ subject }}
+          </a>
+        </div>
         <el-input
           v-model.trim="query.keyword"
           clearable
@@ -224,7 +237,7 @@ watch(
           </div>
           <div class="resource-actions">
             <el-button type="primary" plain :icon="'View'" @click="openDetail(item)">详情</el-button>
-            <el-button :disabled="!item.fileUrl" :icon="'Link'" @click="openResource(item)">打开</el-button>
+            <el-button :icon="'Link'" @click="openResource(item)">打开具体资源</el-button>
           </div>
         </article>
 
@@ -276,10 +289,10 @@ watch(
           <el-descriptions-item label="知识点">{{ currentResource.knowledgePoint || '-' }}</el-descriptions-item>
           <el-descriptions-item label="教材版本">{{ currentResource.textbookVersion || '-' }}</el-descriptions-item>
           <el-descriptions-item label="文件大小">{{ formatFileSize(currentResource.fileSize) }}</el-descriptions-item>
-          <el-descriptions-item label="文件地址">{{ currentResource.fileUrl || '暂无' }}</el-descriptions-item>
+          <el-descriptions-item label="具体链接">{{ resolveResourceUrl(currentResource) }}</el-descriptions-item>
         </el-descriptions>
         <div class="drawer-actions">
-          <el-button type="primary" :icon="'Link'" @click="openResource()">打开资源</el-button>
+          <el-button type="primary" :icon="'Link'" @click="openResource()">打开具体资源</el-button>
         </div>
       </div>
     </el-drawer>
@@ -327,6 +340,33 @@ watch(
 .point-input,
 .resource-toolbar .el-select {
   width: 150px;
+}
+
+.resource-toolbar {
+  align-items: stretch;
+}
+
+.subject-shortcuts {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.subject-shortcuts a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--primary-soft);
+  font-size: 13px;
+}
+
+.subject-shortcuts a:hover {
+  border-color: var(--primary);
 }
 
 .resource-grid {
@@ -457,6 +497,16 @@ watch(
   .resource-grid,
   .resource-summary {
     grid-template-columns: 1fr;
+  }
+
+  .resource-toolbar > * {
+    width: 100%;
+  }
+
+  .point-input,
+  .resource-toolbar .el-select,
+  .keyword-input {
+    width: 100%;
   }
 }
 </style>

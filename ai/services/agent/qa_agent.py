@@ -1,17 +1,20 @@
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from ollama import Client
 
 from config.settings import settings
 from services.agent.memory import ConversationMemoryManager
 from agent_tools.calculator_tool import math_calculate
 from agent_tools.ocr_tool import ocr_recognize
 from utils.common_utils import generate_uuid
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """
@@ -29,11 +32,6 @@ SYSTEM_PROMPT = """
 
 class LearningQAAgent:
     def __init__(self):
-        self.client = Client(host=settings.OLLAMA_HOST)
-        self.options = {
-            "temperature": settings.AGENT_TEMPERATURE,
-            "num_predict": settings.AGENT_MAX_TOKENS,
-        }
         self.tools = [math_calculate, ocr_recognize]
         self.memory = ConversationMemoryManager(settings.MAX_HISTORY_TURNS)
 
@@ -70,7 +68,11 @@ class LearningQAAgent:
                 "usedTools": [],
                 "toolCalls": [],
                 "memory": self.memory.stats(session_id),
-                "model": settings.LLM_MODEL_NAME,
+                "model": self._active_model(),
+                "provider": self._active_provider(),
+                "fallback": False,
+                "failureCategory": "",
+                "errorCode": "",
                 "requiresConfirmation": True,
                 "confirmedAnswer": False,
                 "confirmationPrompt": "如果你已经尝试过并需要核对完整答案，请点击“确认查看完整答案”。",
@@ -98,7 +100,11 @@ class LearningQAAgent:
             "usedTools": [item["toolName"] for item in tool_calls if item.get("toolName")],
             "toolCalls": tool_calls,
             "memory": self.memory.stats(session_id),
-            "model": settings.LLM_MODEL_NAME,
+            "model": self._active_model(),
+            "provider": self._active_provider(),
+            "fallback": False,
+            "failureCategory": "",
+            "errorCode": "",
             "requiresConfirmation": False,
             "confirmedAnswer": bool(confirm_answer and requires_confirmation),
         }
@@ -126,7 +132,11 @@ class LearningQAAgent:
                 "missingPoints": points,
                 "comment": "学生未作答，主观题得 0 分。",
                 "scoringMode": "blank_answer",
-                "model": settings.LLM_MODEL_NAME,
+                "model": self._active_model(),
+                "provider": "rule",
+                "fallback": False,
+                "failureCategory": "",
+                "errorCode": "",
             }
 
         prompt = self._build_subjective_score_prompt(
@@ -152,44 +162,42 @@ class LearningQAAgent:
             parsed = self._parse_score_json(raw_answer)
             if parsed:
                 return self._score_payload_from_model(parsed, points, max_score_value)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "AI subjective scoring call failed model=%s category=call_error",
+                self._active_model(),
+                exc_info=True,
+            )
+            return self._heuristic_subjective_score(
+                reference_answer,
+                clean_answer,
+                points,
+                max_score_value,
+                failure_category="call_error",
+                error_code="LLM_API_CALL_FAILED",
+            )
 
-        return self._heuristic_subjective_score(reference_answer, clean_answer, points, max_score_value)
+        return self._heuristic_subjective_score(
+            reference_answer,
+            clean_answer,
+            points,
+            max_score_value,
+            failure_category="invalid_response",
+            error_code="MODEL_JSON_PARSE_FAILED",
+        )
 
     def generate_learning_path(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        provider = str(request.get("provider") or settings.LEARNING_PLAN_PROVIDER or "auto").strip().lower()
         prompt = self._build_learning_path_prompt(request)
-        if provider in {"external", "api", "auto"} and settings.EXTERNAL_LLM_API_KEY:
+        if settings.EXTERNAL_LLM_API_KEY:
             try:
                 content = self._invoke_external_chat(prompt)
                 parsed = self._parse_score_json(content)
                 if parsed:
-                    return self._normalize_learning_path(parsed, request, "external", settings.EXTERNAL_LLM_MODEL)
+                    return self._normalize_learning_path(parsed, request, self._active_provider(), self._active_model())
             except Exception:
-                if provider in {"external", "api"}:
-                    return self._fallback_learning_path(request, "external_failed")
+                return self._fallback_learning_path(request, "external_failed")
 
-        if provider in {"ollama", "local", "auto", "external", "api"}:
-            try:
-                content = self._invoke_llm(
-                    [
-                        SystemMessage(
-                            content=(
-                                "你是学习路径规划 Agent。只输出 JSON 对象，不要输出 Markdown。"
-                                "所有步骤必须能落到系统白名单动作：diagnostic_test, practice, wrong_review, resource_study, stage_test。"
-                            )
-                        ),
-                        HumanMessage(content=prompt),
-                    ]
-                )
-                parsed = self._parse_score_json(content)
-                if parsed:
-                    return self._normalize_learning_path(parsed, request, "ollama", settings.LLM_MODEL_NAME)
-            except Exception:
-                pass
-
-        return self._fallback_learning_path(request, "rule_fallback")
+        return self._fallback_learning_path(request, "api_key_missing")
 
     def _build_input(self, question: str, subject: str, requires_confirmation: bool, confirm_answer: bool) -> str:
         prefixes: List[str] = []
@@ -207,25 +215,9 @@ class LearningQAAgent:
         return ""
 
     def _invoke_llm(self, messages: List[BaseMessage]) -> str:
-        response = self.client.chat(
-            model=settings.LLM_MODEL_NAME,
-            messages=[self._ollama_message(message) for message in messages],
-            stream=False,
-            options=self.options,
-        )
-        message = getattr(response, "message", None)
-        if message is not None:
-            content = getattr(message, "content", None)
-            if content:
-                return self._content_to_text(content)
-        if isinstance(response, dict):
-            return self._content_to_text(response.get("message", {}).get("content", ""))
-        try:
-            return self._content_to_text(response["message"]["content"])
-        except Exception:
-            return ""
+        return self._invoke_external_chat_messages(messages)
 
-    def _ollama_message(self, message: BaseMessage) -> Dict[str, str]:
+    def _chat_message(self, message: BaseMessage) -> Dict[str, str]:
         if isinstance(message, SystemMessage):
             role = "system"
         elif isinstance(message, AIMessage):
@@ -236,6 +228,12 @@ class LearningQAAgent:
             "role": role,
             "content": self._content_to_text(message.content),
         }
+
+    def _active_provider(self) -> str:
+        return "openai-compatible"
+
+    def _active_model(self) -> str:
+        return settings.EXTERNAL_LLM_MODEL
 
     def _content_to_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -335,18 +333,21 @@ class LearningQAAgent:
         )
 
     def _invoke_external_chat(self, prompt: str) -> str:
+        messages = [
+            SystemMessage(content="你是学习路径规划 Agent。只输出 JSON，不要输出 Markdown 或解释文字。"),
+            HumanMessage(content=prompt),
+        ]
+        return self._invoke_external_chat_messages(messages, max_tokens=1800)
+
+    def _invoke_external_chat_messages(self, messages: List[BaseMessage], max_tokens: Optional[int] = None) -> str:
+        if not settings.EXTERNAL_LLM_API_KEY:
+            raise RuntimeError("EXTERNAL_LLM_API_KEY is not configured")
         url = settings.EXTERNAL_LLM_BASE_URL.rstrip("/") + "/chat/completions"
         payload = {
             "model": settings.EXTERNAL_LLM_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你是学习路径规划 Agent。只输出 JSON，不要输出 Markdown 或解释文字。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 1800,
+            "messages": [self._chat_message(message) for message in messages],
+            "temperature": settings.AGENT_TEMPERATURE,
+            "max_tokens": max_tokens or settings.AGENT_MAX_TOKENS,
         }
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
@@ -451,7 +452,7 @@ class LearningQAAgent:
         ]
         return {
             "provider": mode,
-            "model": settings.EXTERNAL_LLM_MODEL if mode.startswith("external") else settings.LLM_MODEL_NAME,
+            "model": settings.EXTERNAL_LLM_MODEL,
             "planSummary": "根据目标、画像和薄弱点生成诊断-练习-复盘-资源-测评闭环。",
             "steps": [
                 {
@@ -545,7 +546,11 @@ class LearningQAAgent:
             "missingPoints": missing,
             "comment": str(parsed.get("comment") or "AI 已根据参考答案和评分要点完成语义评分。").strip(),
             "scoringMode": "llm_semantic",
-            "model": settings.LLM_MODEL_NAME,
+            "model": self._active_model(),
+            "provider": self._active_provider(),
+            "fallback": False,
+            "failureCategory": "",
+            "errorCode": "",
         }
 
     def _heuristic_subjective_score(
@@ -554,6 +559,8 @@ class LearningQAAgent:
         student_answer: str,
         scoring_points: List[str],
         max_score: float,
+        failure_category: str = "fallback",
+        error_code: str = "HEURISTIC_FALLBACK",
     ) -> Dict[str, Any]:
         matched: List[str] = []
         missing: List[str] = []
@@ -578,7 +585,11 @@ class LearningQAAgent:
             "missingPoints": missing,
             "comment": "AI 模型不可用或未返回有效 JSON，已按评分要点和参考答案相似度进行兜底评分。",
             "scoringMode": "heuristic_fallback",
-            "model": settings.LLM_MODEL_NAME,
+            "model": self._active_model(),
+            "provider": "rule_fallback",
+            "fallback": True,
+            "failureCategory": failure_category,
+            "errorCode": error_code,
         }
 
     def _normalize_scoring_points(

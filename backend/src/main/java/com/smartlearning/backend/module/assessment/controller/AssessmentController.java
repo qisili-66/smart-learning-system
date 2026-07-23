@@ -56,7 +56,9 @@ public class AssessmentController {
     private static final int REVIEW_STATUS_NONE = 0;
     private static final int REVIEW_STATUS_DONE = 1;
     private static final int QUESTION_TYPE_SUBJECTIVE = 4;
+    private static final int RECENT_ASSESSMENT_LOOKBACK = 5;
     private static final BigDecimal AI_AUTO_SCORE_CONFIDENCE = BigDecimal.valueOf(55);
+    private static final Set<String> CORE_EXAM_SUBJECTS = Set.of("语文", "数学", "英语");
 
     private final AssessmentService assessmentService;
     private final AssessmentAnswerService assessmentAnswerService;
@@ -82,7 +84,7 @@ public class AssessmentController {
     @PostMapping
     public Result<Assessment> create(@RequestBody Assessment assessment) {
         assessment.setUserId(SecurityUtils.currentUserId());
-        assessment.setTotalScore(BigDecimal.valueOf(100));
+        assessment.setTotalScore(defaultTotalScore(assessment.getSubject()));
         assessment.setAssessmentStatus(1);
         assessment.setStartTime(LocalDateTime.now());
         assessment.setCreateTime(LocalDateTime.now());
@@ -105,7 +107,7 @@ public class AssessmentController {
     public Result<Map<String, Object>> submit(@PathVariable Long assessmentId, @RequestBody Map<String, Object> request) {
         Assessment assessment = getOwnedAssessment(assessmentId);
         List<Map<String, Object>> answers = castAnswers(request.get("answers"));
-        List<QuestionBank> questions = assessmentQuestionEntities(assessment);
+        List<SelectedQuestion> questions = assessmentSelectedQuestions(assessment);
         List<AssessmentAnswer> details = buildAnswerDetails(assessment, questions, answers);
         replaceAnswerDetails(assessment, details);
         List<Map<String, Object>> wrongQuestions = wrongQuestionService.collectFromAnswers(
@@ -353,44 +355,226 @@ public class AssessmentController {
     }
 
     private List<Map<String, Object>> assessmentQuestions(Assessment assessment) {
-        int limit = questionLimit(assessment);
-        List<QuestionBank> candidates = queryQuestions(assessment, true);
-        if (candidates.size() < limit) {
-            Set<Long> existingIds = candidates.stream()
-                    .map(QuestionBank::getQuestionId)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toSet());
-            List<QuestionBank> fallback = queryQuestions(assessment, false).stream()
-                    .filter(question -> !existingIds.contains(question.getQuestionId()))
-                    .toList();
-            candidates = new ArrayList<>(candidates);
-            candidates.addAll(fallback);
+        List<SelectedQuestion> selected = assessmentSelectedQuestions(assessment);
+        List<BigDecimal> scores = maxScoresForSelectedQuestions(assessment, selected);
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (int index = 0; index < selected.size(); index++) {
+            SelectedQuestion selectedQuestion = selected.get(index);
+            Map<String, Object> item = questionMap(selectedQuestion.question());
+            item.put("maxScore", scores.get(index));
+            PaperSectionSpec section = selectedQuestion.section();
+            if (section != null) {
+                item.put("paperSectionTitle", section.title());
+                item.put("paperSectionNote", section.note());
+            }
+            items.add(item);
         }
-        return candidates.stream()
-                .limit(limit)
-                .map(this::questionMap)
-                .toList();
+        return items;
     }
 
-    private List<QuestionBank> assessmentQuestionEntities(Assessment assessment) {
+    private List<SelectedQuestion> assessmentSelectedQuestions(Assessment assessment) {
         int limit = questionLimit(assessment);
         List<QuestionBank> candidates = queryQuestions(assessment, true);
-        if (candidates.size() < limit) {
-            Set<Long> existingIds = candidates.stream()
-                    .map(QuestionBank::getQuestionId)
+        boolean standardPaper = !paperSectionSpecs(assessment.getSubject()).isEmpty();
+        if (standardPaper) {
+            candidates = mergeQuestions(candidates, queryQuestions(assessment, false, false));
+        } else if (candidates.size() < limit) {
+            candidates = mergeQuestions(candidates, queryQuestions(assessment, false));
+        }
+        return selectQuestions(assessment, candidates, limit);
+    }
+
+    private List<SelectedQuestion> selectQuestions(Assessment assessment, List<QuestionBank> candidates, int limit) {
+        List<QuestionBank> unique = uniqueQuestions(candidates);
+        Set<Long> recentIds = recentQuestionIds(assessment);
+        List<QuestionBank> fresh = unique.stream()
+                .filter(question -> !recentIds.contains(question.getQuestionId()))
+                .toList();
+        boolean standardPaper = !paperSectionSpecs(assessment.getSubject()).isEmpty();
+        List<QuestionBank> pool = standardPaper
+                ? (hasSectionCoverage(fresh, assessment) ? fresh : unique)
+                : (fresh.size() >= limit ? fresh : unique);
+        if (paperSectionSpecs(assessment.getSubject()).isEmpty()) {
+            return stableRotatedQuestions(pool, assessment, limit).stream()
+                    .limit(limit)
+                    .map(question -> new SelectedQuestion(question, null))
+                    .toList();
+        }
+        return selectExamPaperQuestions(pool, assessment, limit);
+    }
+
+    private List<SelectedQuestion> selectExamPaperQuestions(List<QuestionBank> questions, Assessment assessment, int limit) {
+        List<SelectedQuestion> selected = new ArrayList<>();
+        Set<String> selectedKeys = new HashSet<>();
+        for (PaperSectionSpec section : paperSectionSpecs(assessment.getSubject())) {
+            List<QuestionBank> typed = questions.stream()
+                    .filter(question -> Objects.equals(question.getQuestionType(), section.questionType()))
+                    .toList();
+            stableRotatedQuestions(typed, assessment, section.count()).stream()
+                    .filter(question -> selectedKeys.add(questionKey(question)))
+                    .limit(section.count())
+                    .map(question -> new SelectedQuestion(question, section))
+                    .forEach(selected::add);
+        }
+        return selected.stream().limit(limit).toList();
+    }
+
+    private boolean hasSectionCoverage(List<QuestionBank> questions, Assessment assessment) {
+        List<PaperSectionSpec> sections = paperSectionSpecs(assessment.getSubject());
+        if (sections.isEmpty()) {
+            return true;
+        }
+        for (PaperSectionSpec section : sections) {
+            long count = questions.stream()
+                    .filter(question -> Objects.equals(question.getQuestionType(), section.questionType()))
+                    .map(this::questionKey)
+                    .distinct()
+                    .count();
+            if (count < section.count()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private List<PaperSectionSpec> paperSectionSpecs(String subject) {
+        return switch (ResponseUtils.safe(subject)) {
+            case "语文" -> List.of(
+                    new PaperSectionSpec("一、积累与运用", "24 分：字音字形、古诗文默写、病句、词语运用、综合性学习、名著阅读；附加名著题计入总分，上限 120 分。", 1, 8, BigDecimal.valueOf(3)),
+                    new PaperSectionSpec("二、阅读", "46 分：古诗词阅读、课内外文言文对比阅读、实用类文本、文学类文本。", 4, 4, BigDecimal.valueOf(11.5)),
+                    new PaperSectionSpec("三、作文", "50 分：材料作文，不少于 500 字，诗歌除外。", 4, 1, BigDecimal.valueOf(50))
+            );
+            case "数学" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "10 小题，每题 3 分，共 30 分。", 1, 10, BigDecimal.valueOf(3)),
+                    new PaperSectionSpec("二、填空题", "5 小题，每题 3 分，共 15 分。", 3, 5, BigDecimal.valueOf(3)),
+                    new PaperSectionSpec("三、基础解答题", "3 题，每题 8 分；计算、方程不等式、几何证明。", 4, 3, BigDecimal.valueOf(8)),
+                    new PaperSectionSpec("四、中档解答题", "3 题，每题 9 分；函数、统计概率、综合探究。", 4, 3, BigDecimal.valueOf(9)),
+                    new PaperSectionSpec("五、压轴大题", "2 题，每题 12 分；综合探究与压轴题。", 4, 2, BigDecimal.valueOf(12))
+            );
+            case "英语" -> List.of(
+                    new PaperSectionSpec("一、听说考试", "30 分，机考：模仿朗读、信息获取、信息转述及询问。", 4, 4, BigDecimal.valueOf(7.5)),
+                    new PaperSectionSpec("二、语法选择", "15 题，15 分。", 1, 15, BigDecimal.ONE),
+                    new PaperSectionSpec("三、完形填空", "10 题，10 分。", 1, 10, BigDecimal.ONE),
+                    new PaperSectionSpec("四、阅读理解", "15 题，30 分。", 1, 15, BigDecimal.valueOf(2)),
+                    new PaperSectionSpec("五、阅读填空", "五选五，5 题，5 分。", 3, 5, BigDecimal.ONE),
+                    new PaperSectionSpec("六、读写综合", "语篇填词、完成句子、书面表达；含 15 分作文。", 4, 3, BigDecimal.valueOf(5))
+            );
+            case "道德与法治" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "20 小题，每题 2 分，共 40 分。", 1, 20, BigDecimal.valueOf(2)),
+                    new PaperSectionSpec("二、非选择题", "3 大题，共 60 分：图表分析、情境材料、观点评析、实践探究。", 4, 3, BigDecimal.valueOf(20))
+            );
+            case "历史" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "30 小题，每题 2 分，共 60 分。", 1, 30, BigDecimal.valueOf(2)),
+                    new PaperSectionSpec("二、非选择题", "3 大题，共 40 分：材料分析、史料解读、论述简答。", 4, 3, BigDecimal.valueOf(13.33))
+            );
+            case "物理" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "笔试 90 分中的选择题：10 小题，每题 3 分，共 30 分。", 1, 10, BigDecimal.valueOf(3)),
+                    new PaperSectionSpec("二、非选择题", "8 小题，共 60 分：填空、作图、实验探究、计算、综合能力。", 4, 8, BigDecimal.valueOf(7.5)),
+                    new PaperSectionSpec("三、实验操作", "实验操作 10 分。", 4, 1, BigDecimal.valueOf(10))
+            );
+            case "化学" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "笔试 90 分中的选择题：14 小题，每题 3 分，共 42 分。", 1, 14, BigDecimal.valueOf(3)),
+                    new PaperSectionSpec("二、非选择题", "6 小题，共 48 分：基础填空、工艺流程、科普阅读、科学探究、化学计算。", 4, 6, BigDecimal.valueOf(8)),
+                    new PaperSectionSpec("三、实验操作", "实验操作 10 分。", 4, 1, BigDecimal.valueOf(10))
+            );
+            case "地理" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "30 小题，每题 2 分，共 60 分。", 1, 30, BigDecimal.valueOf(2)),
+                    new PaperSectionSpec("二、综合题", "2-3 大题，共 40 分；以读图题为主。", 4, 3, BigDecimal.valueOf(13.33))
+            );
+            case "生物" -> List.of(
+                    new PaperSectionSpec("一、单项选择题", "30 小题，每题 2 分，共 60 分。", 1, 30, BigDecimal.valueOf(2)),
+                    new PaperSectionSpec("二、非选择题", "4 大题，共 40 分：读图理解、资料分析、实验探究、综合应用。", 4, 4, BigDecimal.valueOf(10))
+            );
+            default -> List.of();
+        };
+    }
+
+    private record PaperSectionSpec(String title, String note, Integer questionType, int count, BigDecimal score) {
+    }
+
+    private record SelectedQuestion(QuestionBank question, PaperSectionSpec section) {
+    }
+
+    private List<QuestionBank> uniqueQuestions(List<QuestionBank> questions) {
+        Map<String, QuestionBank> unique = new LinkedHashMap<>();
+        for (QuestionBank question : questions) {
+            if (question == null) {
+                continue;
+            }
+            String key = questionKey(question);
+            unique.putIfAbsent(key, question);
+        }
+        return new ArrayList<>(unique.values());
+    }
+
+    private List<QuestionBank> mergeQuestions(List<QuestionBank> primary, List<QuestionBank> fallback) {
+        List<QuestionBank> merged = new ArrayList<>();
+        merged.addAll(primary);
+        merged.addAll(fallback);
+        return uniqueQuestions(merged);
+    }
+
+    private String questionKey(QuestionBank question) {
+        String text = ResponseUtils.safe(question.getQuestionText()).trim();
+        if (StringUtils.hasText(text)) {
+            return "text:" + ResponseUtils.safe(question.getSubject()) + ":" + text;
+        }
+        return "id:" + question.getQuestionId();
+    }
+
+    private List<QuestionBank> stableRotatedQuestions(List<QuestionBank> questions, Assessment assessment, int limit) {
+        if (questions.isEmpty()) {
+            return List.of();
+        }
+        List<QuestionBank> ordered = questions.stream()
+                .sorted(Comparator
+                        .comparingInt((QuestionBank question) -> difficultyGap(question.getDifficulty(), assessment.getDifficulty()))
+                        .thenComparing(question -> ResponseUtils.safe(question.getKnowledgePoint()))
+                        .thenComparing(QuestionBank::getQuestionId, Comparator.nullsLast(Long::compareTo)))
+                .collect(Collectors.toCollection(ArrayList::new));
+        if (ordered.size() <= limit) {
+            return ordered;
+        }
+        int offset = Math.floorMod(Objects.hashCode(assessment.getAssessmentId()), ordered.size());
+        Collections.rotate(ordered, -offset);
+        return ordered;
+    }
+
+    private Set<Long> recentQuestionIds(Assessment assessment) {
+        if (assessment == null || assessment.getUserId() == null || !StringUtils.hasText(assessment.getSubject())) {
+            return Set.of();
+        }
+        try {
+            List<Assessment> recentAssessments = assessmentService.lambdaQuery()
+                    .eq(Assessment::getUserId, assessment.getUserId())
+                    .eq(Assessment::getSubject, assessment.getSubject())
+                    .eq(Assessment::getAssessmentStatus, 2)
+                    .ne(assessment.getAssessmentId() != null, Assessment::getAssessmentId, assessment.getAssessmentId())
+                    .orderByDesc(Assessment::getEndTime)
+                    .last("LIMIT " + RECENT_ASSESSMENT_LOOKBACK)
+                    .list();
+            List<Long> assessmentIds = recentAssessments.stream()
+                    .map(Assessment::getAssessmentId)
+                    .filter(Objects::nonNull)
+                    .toList();
+            if (assessmentIds.isEmpty()) {
+                return Set.of();
+            }
+            return assessmentAnswerService.lambdaQuery()
+                    .eq(AssessmentAnswer::getUserId, assessment.getUserId())
+                    .in(AssessmentAnswer::getAssessmentId, assessmentIds)
+                    .list()
+                    .stream()
+                    .map(AssessmentAnswer::getQuestionId)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
-            List<QuestionBank> fallback = queryQuestions(assessment, false).stream()
-                    .filter(question -> !existingIds.contains(question.getQuestionId()))
-                    .toList();
-            candidates = new ArrayList<>(candidates);
-            candidates.addAll(fallback);
+        } catch (RuntimeException ignored) {
+            return Set.of();
         }
-        return candidates.stream().limit(limit).toList();
     }
 
     private List<AssessmentAnswer> buildAnswerDetails(Assessment assessment,
-                                                      List<QuestionBank> questions,
+                                                      List<SelectedQuestion> selectedQuestions,
                                                       List<Map<String, Object>> answers) {
         Map<Long, Map<String, Object>> answerMap = new LinkedHashMap<>();
         for (Map<String, Object> item : answers) {
@@ -399,21 +583,12 @@ public class AssessmentController {
                 answerMap.put(questionId, item);
             }
         }
-        BigDecimal totalScore = assessment.getTotalScore() == null || assessment.getTotalScore().compareTo(BigDecimal.ZERO) <= 0
-                ? BigDecimal.valueOf(100)
-                : assessment.getTotalScore();
-        BigDecimal perScore = questions.isEmpty()
-                ? BigDecimal.ZERO
-                : totalScore.divide(BigDecimal.valueOf(questions.size()), 2, RoundingMode.HALF_UP);
-        BigDecimal allocated = BigDecimal.ZERO;
+        List<BigDecimal> maxScores = maxScoresForSelectedQuestions(assessment, selectedQuestions);
         List<AssessmentAnswer> details = new ArrayList<>();
         LocalDateTime now = LocalDateTime.now();
-        for (int index = 0; index < questions.size(); index++) {
-            QuestionBank question = questions.get(index);
-            BigDecimal maxScore = index == questions.size() - 1
-                    ? totalScore.subtract(allocated).setScale(2, RoundingMode.HALF_UP)
-                    : perScore;
-            allocated = allocated.add(maxScore);
+        for (int index = 0; index < selectedQuestions.size(); index++) {
+            QuestionBank question = selectedQuestions.get(index).question();
+            BigDecimal maxScore = maxScores.get(index);
             Map<String, Object> submitted = answerMap.get(question.getQuestionId());
             String userAnswer = submitted == null || submitted.get("userAnswer") == null
                     ? ""
@@ -433,6 +608,63 @@ public class AssessmentController {
             ));
         }
         return details;
+    }
+
+    private List<BigDecimal> maxScoresForSelectedQuestions(Assessment assessment, List<SelectedQuestion> selectedQuestions) {
+        if (selectedQuestions.isEmpty()) {
+            return List.of();
+        }
+        BigDecimal totalScore = assessment.getTotalScore() == null || assessment.getTotalScore().compareTo(BigDecimal.ZERO) <= 0
+                ? defaultTotalScore(assessment.getSubject())
+                : assessment.getTotalScore();
+        List<PaperSectionSpec> sections = paperSectionSpecs(assessment.getSubject());
+        return sections.isEmpty()
+                ? equalScores(totalScore, selectedQuestions.size())
+                : standardPaperScoresForSelected(totalScore, selectedQuestions);
+    }
+
+    private List<BigDecimal> standardPaperScoresForSelected(BigDecimal totalScore, List<SelectedQuestion> selectedQuestions) {
+        List<BigDecimal> scores = selectedQuestions.stream()
+                .map(selected -> selected.section() == null ? BigDecimal.ZERO : selected.section().score())
+                .collect(Collectors.toCollection(ArrayList::new));
+        BigDecimal allocated = scores.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (!scores.isEmpty() && allocated.compareTo(totalScore) != 0) {
+            int last = scores.size() - 1;
+            scores.set(last, scores.get(last).add(totalScore.subtract(allocated)).setScale(2, RoundingMode.HALF_UP));
+        }
+        return scores;
+    }
+
+    private List<BigDecimal> standardPaperScores(BigDecimal totalScore, int questionCount, List<PaperSectionSpec> sections) {
+        List<BigDecimal> scores = new ArrayList<>();
+        for (PaperSectionSpec section : sections) {
+            for (int index = 0; index < section.count() && scores.size() < questionCount; index++) {
+                scores.add(section.score());
+            }
+        }
+        while (scores.size() < questionCount) {
+            scores.add(BigDecimal.ZERO);
+        }
+        BigDecimal allocated = scores.stream().reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (!scores.isEmpty() && allocated.compareTo(totalScore) != 0) {
+            int last = scores.size() - 1;
+            scores.set(last, scores.get(last).add(totalScore.subtract(allocated)).setScale(2, RoundingMode.HALF_UP));
+        }
+        return scores;
+    }
+
+    private List<BigDecimal> equalScores(BigDecimal totalScore, int count) {
+        BigDecimal perScore = totalScore.divide(BigDecimal.valueOf(count), 2, RoundingMode.HALF_UP);
+        List<BigDecimal> scores = new ArrayList<>();
+        BigDecimal allocated = BigDecimal.ZERO;
+        for (int index = 0; index < count; index++) {
+            BigDecimal score = index == count - 1
+                    ? totalScore.subtract(allocated).setScale(2, RoundingMode.HALF_UP)
+                    : perScore;
+            scores.add(score);
+            allocated = allocated.add(score);
+        }
+        return scores;
     }
 
     private AssessmentAnswer buildAnswerDetail(Assessment assessment,
@@ -514,12 +746,14 @@ public class AssessmentController {
         Map<String, Object> aiResult = aiService.subjectiveScore(request);
         boolean aiAvailable = Boolean.TRUE.equals(aiResult.get("available"));
         if (!aiAvailable) {
-            aiResult = localSubjectiveScore(question, safeAnswer, maxScore, aiResult.get("message"));
+            aiResult = localSubjectiveScore(question, safeAnswer, maxScore, aiResult);
         }
 
         BigDecimal score = clampScore(toBigDecimal(aiResult.get("score"), maxScore.multiply(BigDecimal.valueOf(0.5D))), maxScore);
         BigDecimal confidence = clampPercent(toBigDecimal(aiResult.get("confidence"), BigDecimal.ZERO));
-        boolean reliable = aiAvailable && confidence.compareTo(AI_AUTO_SCORE_CONFIDENCE) >= 0;
+        boolean reliable = aiAvailable
+                && !aiFallbackOrFailure(aiResult)
+                && confidence.compareTo(AI_AUTO_SCORE_CONFIDENCE) >= 0;
 
         detail.setScore(score);
         detail.setAiScore(score);
@@ -553,11 +787,18 @@ public class AssessmentController {
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("available", false);
+        data.put("fallback", true);
         data.put("score", maxScore.multiply(ratio).setScale(2, RoundingMode.HALF_UP));
         data.put("confidence", BigDecimal.valueOf(45));
         data.put("matchedPoints", matchedPoints);
         data.put("missingPoints", missingPoints);
         data.put("scoringMode", "java_fallback");
+        if (unavailableReason instanceof Map<?, ?> rawObservation) {
+            Map<String, Object> observation = new LinkedHashMap<>();
+            rawObservation.forEach((key, value) -> observation.put(String.valueOf(key), value));
+            copyObservation(observation, data, "operation", "endpoint", "latencyMs", "provider", "model",
+                    "failureCategory", "errorCode", "errorMessage", "message");
+        }
         data.put("comment", "AI 服务不可用，已按评分要点相似度给出临时参考分；原因：" + ResponseUtils.safe(unavailableReason == null ? null : unavailableReason.toString()));
         return data;
     }
@@ -611,6 +852,7 @@ public class AssessmentController {
         data.put("maxScore", answer.getMaxScore());
         data.put("scoreStatus", answer.getScoreStatus());
         data.put("scoreStatusLabel", scoreStatusLabel(answer.getScoreStatus()));
+        data.put("requiresManualReview", Integer.valueOf(SCORE_STATUS_PENDING_MANUAL).equals(answer.getScoreStatus()));
         data.put("reviewStatus", answer.getReviewStatus());
         data.put("reviewComment", ResponseUtils.safe(answer.getReviewComment()));
         data.put("scoringDetail", ResponseUtils.safe(answer.getScoringDetail()));
@@ -670,7 +912,11 @@ public class AssessmentController {
     }
 
     private List<QuestionBank> queryQuestions(Assessment assessment, boolean strictDifficulty) {
-        List<String> scopes = splitScopes(assessment.getKnowledgeScope());
+        return queryQuestions(assessment, strictDifficulty, true);
+    }
+
+    private List<QuestionBank> queryQuestions(Assessment assessment, boolean strictDifficulty, boolean strictKnowledgeScope) {
+        List<String> scopes = strictKnowledgeScope ? splitScopes(assessment.getKnowledgeScope()) : List.of();
         List<QuestionBank> questions = questionBankService.lambdaQuery()
                 .eq(StringUtils.hasText(assessment.getSubject()), QuestionBank::getSubject, assessment.getSubject())
                 .eq(strictDifficulty && assessment.getDifficulty() != null, QuestionBank::getDifficulty, assessment.getDifficulty())
@@ -707,6 +953,12 @@ public class AssessmentController {
     }
 
     private int questionLimit(Assessment assessment) {
+        int paperCount = paperSectionSpecs(assessment.getSubject()).stream()
+                .mapToInt(PaperSectionSpec::count)
+                .sum();
+        if (paperCount > 0) {
+            return paperCount;
+        }
         Integer type = assessment.getAssessmentType();
         if (type != null && type == 3) {
             return 10;
@@ -715,6 +967,12 @@ public class AssessmentController {
             return 8;
         }
         return 5;
+    }
+
+    private BigDecimal defaultTotalScore(String subject) {
+        return CORE_EXAM_SUBJECTS.contains(ResponseUtils.safe(subject))
+                ? BigDecimal.valueOf(120)
+                : BigDecimal.valueOf(100);
     }
 
     private BigDecimal readScore(Map<String, Object> request, String key, BigDecimal defaultValue) {
@@ -788,7 +1046,64 @@ public class AssessmentController {
         if (!reliable) {
             detail += "（建议人工复核）";
         }
+        String observation = aiObservationSummary(aiResult);
+        if (StringUtils.hasText(observation)) {
+            detail += ", aiObservation=" + observation;
+        }
         return limitText(detail, 480);
+    }
+
+    private boolean aiFallbackOrFailure(Map<String, Object> aiResult) {
+        if (aiResult == null || aiResult.isEmpty()) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(aiResult.get("fallback"))) {
+            return true;
+        }
+        String mode = observationText(aiResult, "scoringMode");
+        String provider = observationText(aiResult, "provider");
+        String failureCategory = observationText(aiResult, "failureCategory");
+        String errorCode = observationText(aiResult, "errorCode");
+        return mode.contains("fallback")
+                || provider.contains("fallback")
+                || StringUtils.hasText(failureCategory)
+                || StringUtils.hasText(errorCode);
+    }
+
+    private String aiObservationSummary(Map<String, Object> aiResult) {
+        List<String> parts = new ArrayList<>();
+        addObservationPart(parts, "provider", aiResult);
+        addObservationPart(parts, "model", aiResult);
+        addObservationPart(parts, "latencyMs", aiResult);
+        addObservationPart(parts, "failureCategory", aiResult);
+        addObservationPart(parts, "errorCode", aiResult);
+        return String.join("; ", parts);
+    }
+
+    private void addObservationPart(List<String> parts, String key, Map<String, Object> aiResult) {
+        String value = observationText(aiResult, key);
+        if (StringUtils.hasText(value)) {
+            parts.add(key + "=" + value);
+        }
+    }
+
+    private String observationText(Map<String, Object> data, String key) {
+        if (data == null || data.get(key) == null) {
+            return "";
+        }
+        String value = ResponseUtils.safe(data.get(key).toString());
+        return "null".equalsIgnoreCase(value) ? "" : value;
+    }
+
+    private void copyObservation(Map<String, Object> source, Map<String, Object> target, String... keys) {
+        if (source == null || target == null) {
+            return;
+        }
+        for (String key : keys) {
+            if (source.containsKey(key) && !target.containsKey(key)) {
+                target.put(key, source.get(key));
+            }
+        }
     }
 
     private String listSummary(Object value) {

@@ -1,5 +1,6 @@
 server:
-  port: 8080
+  address: ${SERVER_ADDRESS:0.0.0.0}
+  port: ${SERVER_PORT:8080}
   servlet:
     context-path: /api
 
@@ -10,16 +11,16 @@ spring:
   # 数据库配置
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/smart_learning_system?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:smart_learning_system}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=${DB_ALLOW_PUBLIC_KEY_RETRIEVAL:true}
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:}
+    password: ${DB_PASSWORD:root}
 
   # Redis 配置
   data:
     redis:
-      host: localhost
-      port: 6379
-      database: 0
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
       timeout: 3000ms
 
 # MyBatis-Plus 配置
@@ -27,13 +28,13 @@ mybatis-plus:
   type-aliases-package: com.smartlearning.backend.module
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    log-impl: ${MYBATIS_LOG_IMPL:org.apache.ibatis.logging.stdout.StdOutImpl}
   global-config:
     db-config:
       id-type: auto
 
 knife4j:
-  enable: true
+  enable: ${KNIFE4J_ENABLE:true}
   openapi:
     title: 智慧学习辅助系统接口文档
     description: 基于 AI Agent 的智慧学习辅助系统 API
@@ -45,9 +46,9 @@ knife4j:
           - com.smartlearning.backend.module
 ai:
   service:
-    base-url: http://127.0.0.1:8000
-    connect-timeout: 5000
-    timeout: 300000
+    base-url: ${AI_SERVICE_BASE_URL:http://127.0.0.1:8000}
+    connect-timeout: ${AI_SERVICE_CONNECT_TIMEOUT:5000}
+    timeout: ${AI_SERVICE_TIMEOUT:300000}
 
 security:
   jwt:

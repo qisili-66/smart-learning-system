@@ -19,7 +19,7 @@
 | --- | --- |
 | 前端 | Vue 3、Vite、Vue Router、Pinia、Element Plus、Axios、ECharts |
 | 后端 | Java 17、Spring Boot 3、Spring Security、MyBatis-Plus、JWT、MySQL、Redis |
-| AI 服务 | Python、FastAPI、LangChain、Ollama、PaddleOCR |
+| AI 服务 | Python、FastAPI、LangChain 消息模型、OpenAI 兼容 API、PaddleOCR |
 
 ## 项目结构
 
@@ -38,7 +38,7 @@ smart-learning-system/
 - Python 3.12
 - MySQL 8.x
 - Redis 6.x 或更高版本
-- Ollama（使用本地大模型时需要）
+- OpenAI 兼容 API Key
 
 ## 快速开始
 
@@ -64,7 +64,7 @@ mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sq
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DB_USERNAME` | `root` | MySQL 用户名 |
-| `DB_PASSWORD` | 空 | MySQL 密码 |
+| `DB_PASSWORD` | `root` | MySQL 密码，本地默认值；服务器部署时必须通过环境变量覆盖 |
 | `JWT_SECRET` | 本地开发默认值 | JWT 签名密钥，部署时必须修改 |
 | `JWT_ACCESS_EXPIRE_MS` | `86400000` | Access Token 有效期（毫秒） |
 | `JWT_REFRESH_EXPIRE_MS` | `604800000` | Refresh Token 有效期（毫秒） |
@@ -107,16 +107,13 @@ python3.12 -m venv .venv
 ./.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-AI 服务默认使用 Ollama，可通过以下环境变量调整：
+AI 服务统一调用 OpenAI 兼容 API。不要把真实密钥写入仓库，部署时通过服务器环境变量注入：
 
 | 环境变量 | 说明 |
 | --- | --- |
-| `OLLAMA_HOST` | Ollama 服务地址 |
-| `LLM_MODEL_NAME` | 本地模型名称 |
-| `LEARNING_PLAN_PROVIDER` | 学习计划生成方式，如 `external`、`ollama` 或 `auto` |
 | `EXTERNAL_LLM_BASE_URL` | OpenAI 兼容接口地址 |
-| `EXTERNAL_LLM_MODEL` | 外部模型名称 |
-| `EXTERNAL_LLM_API_KEY` | 外部接口密钥 |
+| `EXTERNAL_LLM_MODEL` | 默认 `qwen3.7-max` |
+| `EXTERNAL_LLM_API_KEY` | OpenAI 兼容 API Key，也可使用 `OPENAI_API_KEY` |
 
 也可以复制根目录 `auth.example.json` 为 `auth.json`，再填写本地密钥。`auth.json` 已被 Git 忽略，请勿提交真实密钥。
 

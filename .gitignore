@@ -1,7 +1,10 @@
-﻿# Runtime and editor files
+# Runtime and editor files
 .vscode/
 /auth.json
+/mcp-shell.log
 /work.md
+/doc/
+/docs/
 /docs/接口文档.txt
 /docs/接口规范文档.txt
 /docs/用户体验测试指南.md
@@ -13,6 +16,15 @@
 *.pem
 *.p12
 *.jks
+
+# Frontend
+frontend/dist/
+frontend/dist-*/
+
+# Deployment local secrets
+deploy/**/smart-learning.env
+deploy/**/*.local
+deploy/**/*.log
 
 # Python
 __pycache__/
@@ -34,3 +46,4 @@ backend/exports/
 # OS
 .DS_Store
 Thumbs.db
+/%SystemDrive%/

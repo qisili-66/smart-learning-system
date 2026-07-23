@@ -57,6 +57,12 @@ const routes = [
         name: 'adminSystem',
         component: () => import('@/views/admin/system/index.vue'),
         meta: { title: '系统运维' }
+      },
+      {
+        path: 'audits',
+        name: 'adminAudits',
+        component: () => import('@/views/admin/audits/index.vue'),
+        meta: { title: '审计中心' }
       }
     ]
   },
@@ -143,6 +149,12 @@ const routes = [
         name: 'resources',
         component: () => import('@/views/student/resource/index.vue'),
         meta: { title: '资源库' }
+      },
+      {
+        path: 'personal-data',
+        name: 'personalData',
+        component: () => import('@/views/student/personal-data/index.vue'),
+        meta: { title: '个人数据' }
       }
     ]
   },

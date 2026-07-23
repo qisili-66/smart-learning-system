@@ -14,7 +14,10 @@ const navGroups = [
   {
     title: '系统管理',
     icon: 'Setting',
-    children: [{ path: '/admin/users', title: '用户管理', icon: 'UserFilled' }]
+    children: [
+      { path: '/admin/users', title: '用户管理', icon: 'UserFilled' },
+      { path: '/admin/audits', title: '审计中心', icon: 'Tickets' }
+    ]
   },
   {
     title: '教学管理',

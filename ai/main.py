@@ -1,4 +1,6 @@
 import json
+import logging
+import time
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile
@@ -10,6 +12,9 @@ from models.qa import LearningPathRequest, SubjectiveScoreRequest, TextQARequest
 from services.agent.qa_agent import qa_agent
 from services.ocr_service import ocr_service
 from utils.common_utils import generate_uuid
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="Smart Learning AI Service", version=settings.AI_SERVICE_VERSION)
@@ -29,8 +34,9 @@ def health_check():
         data={
             "status": "running",
             "version": settings.AI_SERVICE_VERSION,
-            "agent": "Ollama Client",
-            "model": settings.LLM_MODEL_NAME,
+            "agent": "Learning QA Agent",
+            "model": settings.EXTERNAL_LLM_MODEL,
+            "provider": "openai-compatible",
             "tools": ["math_calculate", "ocr_recognize"],
         }
     )
@@ -55,6 +61,7 @@ def text_qa(request: TextQARequest):
 
 @app.post("/assessment/subjective-score", response_model=Result, summary="AI主观题语义评分")
 def subjective_score(request: SubjectiveScoreRequest):
+    started = time.perf_counter()
     try:
         result = qa_agent.score_subjective_answer(
             question_text=request.questionText,
@@ -64,6 +71,18 @@ def subjective_score(request: SubjectiveScoreRequest):
             max_score=request.maxScore,
             subject=request.subject,
             knowledge_point=request.knowledgePoint,
+        )
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        result["latencyMs"] = latency_ms
+        result.setdefault("operation", "subjective_score")
+        result.setdefault("endpoint", "/assessment/subjective-score")
+        logger.info(
+            "AI subjective score success latencyMs=%s provider=%s model=%s fallback=%s failureCategory=%s",
+            latency_ms,
+            result.get("provider", ""),
+            result.get("model", ""),
+            result.get("fallback", False),
+            result.get("failureCategory", ""),
         )
         return Result(data=result)
     except Exception as exc:

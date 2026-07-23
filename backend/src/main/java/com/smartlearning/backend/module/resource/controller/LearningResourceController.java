@@ -19,13 +19,28 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Tag(name = "学习资源模块")
 @RestController
 @RequestMapping("/learning-resources")
 public class LearningResourceController {
+
+    private static final String SMARTEDU_SEARCH_BASE = "https://basic.smartedu.cn/search?keyword=";
+    private static final Set<String> PLACEHOLDER_RESOURCE_HOSTS = Set.of("example.com", "www.example.com", "localhost", "127.0.0.1");
+    private static final Map<Integer, String> RESOURCE_TYPE_KEYWORDS = Map.of(
+            1, "微课",
+            2, "课件",
+            3, "练习",
+            4, "思维导图",
+            5, "考点手册"
+    );
 
     private final LearningResourceService learningResourceService;
     private final UserProfileService userProfileService;
@@ -48,6 +63,7 @@ public class LearningResourceController {
                 .like(StringUtils.hasText(knowledgePoint), LearningResource::getKnowledgePoint, knowledgePoint)
                 .orderByDesc(LearningResource::getCreateTime);
         Page<LearningResource> page = learningResourceService.page(PageUtils.page(pageNum, pageSize), query);
+        sanitizeResources(page);
         return Result.success(PageVO.of(page));
     }
 
@@ -71,13 +87,14 @@ public class LearningResourceController {
         }
         query.orderByDesc(LearningResource::getCreateTime);
         Page<LearningResource> page = learningResourceService.page(PageUtils.page(pageNum, pageSize), query);
+        sanitizeResources(page);
         return Result.success(PageVO.of(page));
     }
 
     @GetMapping("/categories")
     public Result<Map<String, Object>> categories() {
         return Result.success(Map.of(
-                "subjects", List.of("语文", "数学", "英语"),
+                "subjects", List.of("语文", "数学", "英语", "物理", "化学", "生物", "历史", "地理", "道德与法治"),
                 "resourceTypes", List.of(
                         Map.of("value", 1, "label", "微课"),
                         Map.of("value", 2, "label", "课件"),
@@ -95,6 +112,105 @@ public class LearningResourceController {
             throw new BusinessException(Constants.CODE_NOT_FOUND, "learning resource not found");
         }
         userProfileService.collectResourceView(SecurityUtils.currentUserId(), resourceId);
+        sanitizeResource(resource);
         return Result.success(resource);
+    }
+
+    private void sanitizeResources(Page<LearningResource> page) {
+        if (page == null || page.getRecords() == null) {
+            return;
+        }
+        page.getRecords().forEach(this::sanitizeResource);
+    }
+
+    private void sanitizeResource(LearningResource resource) {
+        if (resource == null || !shouldReplaceWithSmartEduSearch(resource)) {
+            return;
+        }
+        resource.setFileUrl(smartEduResourceUrl(resource));
+        resource.setTextbookVersion("国家中小学智慧教育平台");
+        resource.setFileSize(null);
+    }
+
+    private boolean isPlaceholderResourceUrl(String url) {
+        if (!StringUtils.hasText(url)) {
+            return false;
+        }
+        try {
+            String host = URI.create(url.trim()).getHost();
+            return host != null && PLACEHOLDER_RESOURCE_HOSTS.contains(host.toLowerCase());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private boolean shouldReplaceWithSmartEduSearch(LearningResource resource) {
+        String url = resource.getFileUrl();
+        if (isPlaceholderResourceUrl(url)) {
+            return true;
+        }
+        if (!StringUtils.hasText(url) || !url.startsWith("https://basic.smartedu.cn")) {
+            return false;
+        }
+        if (!url.contains("/search?keyword=")) {
+            return true;
+        }
+        String keyword = normalizedText(searchKeyword(url));
+        String point = normalizedText(firstKnowledgePoint(resource.getKnowledgePoint()));
+        if (StringUtils.hasText(point) && !keyword.contains(point)) {
+            return true;
+        }
+        return keyword.equals(normalizedText(smartEduSubjectKeyword(resource.getSubject())));
+    }
+
+    private String smartEduResourceUrl(LearningResource resource) {
+        String keyword = smartEduSubjectKeyword(resource.getSubject());
+        String point = firstKnowledgePoint(resource.getKnowledgePoint());
+        if (StringUtils.hasText(point)) {
+            keyword += point;
+        }
+        String typeKeyword = RESOURCE_TYPE_KEYWORDS.get(resource.getResourceType());
+        if (StringUtils.hasText(typeKeyword)) {
+            keyword += typeKeyword;
+        }
+        return SMARTEDU_SEARCH_BASE + URLEncoder.encode(keyword, StandardCharsets.UTF_8);
+    }
+
+    private String smartEduSubjectKeyword(String subject) {
+        return "初中" + (StringUtils.hasText(subject) ? subject.trim() : "学习资源");
+    }
+
+    private String firstKnowledgePoint(String knowledgePoint) {
+        if (!StringUtils.hasText(knowledgePoint)) {
+            return "";
+        }
+        return List.of(knowledgePoint.split("[、,，;；|/\\s]+"))
+                .stream()
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .findFirst()
+                .orElse("");
+    }
+
+    private String searchKeyword(String url) {
+        try {
+            String query = URI.create(url).getRawQuery();
+            if (!StringUtils.hasText(query)) {
+                return "";
+            }
+            for (String part : query.split("&")) {
+                int index = part.indexOf('=');
+                if (index > 0 && "keyword".equals(part.substring(0, index))) {
+                    return java.net.URLDecoder.decode(part.substring(index + 1), StandardCharsets.UTF_8);
+                }
+            }
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
+        return "";
+    }
+
+    private String normalizedText(String value) {
+        return StringUtils.hasText(value) ? value.replaceAll("\\s+", "") : "";
     }
 }
