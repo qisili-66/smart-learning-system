@@ -20,6 +20,7 @@ import com.smartlearning.backend.security.SecurityUtils;
 import com.smartlearning.backend.module.assessment.service.AssessmentService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.util.StringUtils;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -57,6 +58,7 @@ public class AssessmentController {
     private static final int REVIEW_STATUS_DONE = 1;
     private static final int QUESTION_TYPE_SUBJECTIVE = 4;
     private static final int RECENT_ASSESSMENT_LOOKBACK = 5;
+    private static final String GENERATED_ASSESSMENT_MARKER = "AI测评#";
     private static final BigDecimal AI_AUTO_SCORE_CONFIDENCE = BigDecimal.valueOf(55);
     private static final Set<String> CORE_EXAM_SUBJECTS = Set.of("语文", "数学", "英语");
 
@@ -82,13 +84,19 @@ public class AssessmentController {
     }
 
     @PostMapping
+    @Transactional
     public Result<Assessment> create(@RequestBody Assessment assessment) {
         assessment.setUserId(SecurityUtils.currentUserId());
+        String gradeLevel = normalizeGradeLevel(assessment.getGradeLevel());
+        String knowledgeScope = ResponseUtils.safe(assessment.getKnowledgeScope());
+        assessment.setKnowledgeScope(displayScope(gradeLevel, knowledgeScope));
         assessment.setTotalScore(defaultTotalScore(assessment.getSubject()));
         assessment.setAssessmentStatus(1);
         assessment.setStartTime(LocalDateTime.now());
         assessment.setCreateTime(LocalDateTime.now());
         assessmentService.save(assessment);
+        generateAssessmentQuestions(assessment, gradeLevel, knowledgeScope);
+        assessment.setGradeLevel(gradeLevel);
         return Result.success(assessment);
     }
 
@@ -372,7 +380,260 @@ public class AssessmentController {
         return items;
     }
 
+    private void generateAssessmentQuestions(Assessment assessment, String gradeLevel, String knowledgeScope) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        List<PaperSectionSpec> sections = generatedSectionSpecs(assessment);
+        request.put("subject", ResponseUtils.safe(assessment.getSubject()));
+        request.put("gradeLevel", gradeLevel);
+        request.put("knowledgeScope", StringUtils.hasText(knowledgeScope) ? knowledgeScope : "综合知识");
+        request.put("difficulty", assessment.getDifficulty() == null ? 2 : assessment.getDifficulty());
+        request.put("assessmentType", assessment.getAssessmentType() == null ? 2 : assessment.getAssessmentType());
+        request.put("totalScore", assessment.getTotalScore() == null ? defaultTotalScore(assessment.getSubject()) : assessment.getTotalScore());
+        request.put("questionCount", sections.stream().mapToInt(PaperSectionSpec::count).sum());
+        request.put("sections", sections.stream().map(section -> Map.<String, Object>of(
+                "title", section.title(),
+                "note", section.note(),
+                "questionType", section.questionType(),
+                "count", section.count()
+        )).toList());
+
+        List<Map<String, Object>> generated = generatedQuestionMaps(aiService.generateAssessmentPaper(request));
+        if (generated.isEmpty()) {
+            generated = javaGeneratedQuestionMaps(request, sections);
+        }
+        List<QuestionBank> questions = generated.stream()
+                .map(item -> generatedQuestion(assessment, item))
+                .filter(question -> StringUtils.hasText(question.getQuestionText()) && StringUtils.hasText(question.getAnswer()))
+                .toList();
+        if (questions.isEmpty()) {
+            throw new BusinessException(Constants.CODE_ERROR, "AI未能生成可用测评题目，请稍后重试");
+        }
+        questionBankService.saveBatch(questions);
+    }
+
+    private List<Map<String, Object>> generatedQuestionMaps(Map<String, Object> aiResult) {
+        if (aiResult == null || !(aiResult.get("questions") instanceof List<?> rawList)) {
+            return List.of();
+        }
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (Object rawItem : rawList) {
+            if (!(rawItem instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            rawMap.forEach((key, value) -> item.put(String.valueOf(key), value));
+            items.add(item);
+        }
+        return items;
+    }
+
+    private List<Map<String, Object>> javaGeneratedQuestionMaps(Map<String, Object> request, List<PaperSectionSpec> sections) {
+        String subject = ResponseUtils.safe(request.get("subject") == null ? null : request.get("subject").toString());
+        String grade = ResponseUtils.safe(request.get("gradeLevel") == null ? null : request.get("gradeLevel").toString());
+        String scope = ResponseUtils.safe(request.get("knowledgeScope") == null ? null : request.get("knowledgeScope").toString());
+        int difficulty = toInteger(request.get("difficulty")) == null ? 2 : toInteger(request.get("difficulty"));
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (PaperSectionSpec section : sections) {
+            for (int index = 0; index < section.count(); index++) {
+                int number = items.size() + 1;
+                items.add(javaGeneratedQuestion(subject, grade, scope, difficulty, section, number));
+            }
+        }
+        return items;
+    }
+
+    private Map<String, Object> javaGeneratedQuestion(String subject, String grade, String scope, int difficulty, PaperSectionSpec section, int number) {
+        String point = StringUtils.hasText(scope) ? scope : "综合知识";
+        String stem = grade + subject + point + "第" + number + "题：";
+        if (Integer.valueOf(1).equals(section.questionType()) || Integer.valueOf(2).equals(section.questionType())) {
+            return Map.of(
+                    "sectionTitle", section.title(),
+                    "knowledgePoint", point,
+                    "difficulty", difficulty,
+                    "questionType", section.questionType(),
+                    "questionText", stem + "下列说法最符合题意的是（ ）。",
+                    "options", List.of("A. 能正确体现核心概念", "B. 与题干条件相反", "C. 忽略了限制条件", "D. 与本知识点无关"),
+                    "answer", "A",
+                    "analysis", "A项符合题干中的核心概念和限制条件，其余选项存在概念或条件错误。 ",
+                    "scoringPoints", List.of("识别核心概念", "排除干扰项")
+            );
+        }
+        return Map.of(
+                "sectionTitle", section.title(),
+                "knowledgePoint", point,
+                "difficulty", difficulty,
+                "questionType", section.questionType(),
+                "questionText", stem + "请结合概念、步骤和结论进行完整解答。 ",
+                "options", List.of(),
+                "answer", "围绕" + point + "说明概念、列出关键步骤，并得到合理结论。 ",
+                "analysis", "主观题按概念准确性、步骤完整性和结论合理性评分。 ",
+                "scoringPoints", List.of("概念准确", "步骤清晰", "结论合理")
+        );
+    }
+
+    private QuestionBank generatedQuestion(Assessment assessment, Map<String, Object> item) {
+        String sectionTitle = ResponseUtils.safe(item.get("sectionTitle") == null ? null : item.get("sectionTitle").toString());
+        String knowledgePoint = ResponseUtils.safe(item.get("knowledgePoint") == null ? null : item.get("knowledgePoint").toString());
+        QuestionBank question = new QuestionBank();
+        question.setSubject(ResponseUtils.safe(assessment.getSubject()));
+        question.setKnowledgePoint(generatedKnowledgePoint(assessment, sectionTitle, knowledgePoint));
+        question.setDifficulty(toInteger(item.get("difficulty")) == null ? assessment.getDifficulty() : toInteger(item.get("difficulty")));
+        question.setQuestionType(toInteger(item.get("questionType")) == null ? 1 : toInteger(item.get("questionType")));
+        question.setQuestionText(ResponseUtils.safe(item.get("questionText") == null ? null : item.get("questionText").toString()));
+        question.setOptions(String.join("|", stringList(item.get("options"))));
+        question.setAnswer(ResponseUtils.safe(item.get("answer") == null ? null : item.get("answer").toString()));
+        question.setAnalysis(ResponseUtils.safe(item.get("analysis") == null ? null : item.get("analysis").toString()));
+        question.setScoringPoints(String.join("\n", stringList(item.get("scoringPoints"))));
+        question.setCreateTime(LocalDateTime.now());
+        question.setUpdateTime(LocalDateTime.now());
+        return question;
+    }
+
+    private List<QuestionBank> generatedQuestions(Assessment assessment) {
+        if (assessment == null || assessment.getAssessmentId() == null) {
+            return List.of();
+        }
+        try {
+            return questionBankService.lambdaQuery()
+                    .eq(StringUtils.hasText(assessment.getSubject()), QuestionBank::getSubject, assessment.getSubject())
+                    .like(QuestionBank::getKnowledgePoint, generatedMarker(assessment))
+                    .orderByAsc(QuestionBank::getQuestionId)
+                    .list();
+        } catch (RuntimeException ignored) {
+            return List.of();
+        }
+    }
+
+    private PaperSectionSpec generatedSection(QuestionBank question, Assessment assessment) {
+        String title = generatedSectionTitle(question);
+        if (StringUtils.hasText(title)) {
+            return new PaperSectionSpec(title, "AI实时生成题，按本次测评自动组卷。", question.getQuestionType(), 1, BigDecimal.ZERO);
+        }
+        return paperSectionSpecs(assessment.getSubject()).stream()
+                .filter(section -> Objects.equals(section.questionType(), question.getQuestionType()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private String generatedKnowledgePoint(Assessment assessment, String sectionTitle, String knowledgePoint) {
+        return generatedMarker(assessment) + "|大题=" + ResponseUtils.safe(sectionTitle) + "|知识点=" + ResponseUtils.safe(knowledgePoint);
+    }
+
+    private String generatedMarker(Assessment assessment) {
+        return GENERATED_ASSESSMENT_MARKER + assessment.getAssessmentId();
+    }
+
+    private String generatedSectionTitle(QuestionBank question) {
+        String point = ResponseUtils.safe(question == null ? null : question.getKnowledgePoint());
+        return extractGeneratedField(point, "大题");
+    }
+
+    private String cleanKnowledgePoint(String value) {
+        String safe = ResponseUtils.safe(value);
+        if (!safe.startsWith(GENERATED_ASSESSMENT_MARKER)) {
+            return safe;
+        }
+        String point = extractGeneratedField(safe, "知识点");
+        return StringUtils.hasText(point) ? point : "AI生成题";
+    }
+
+    private String extractGeneratedField(String value, String key) {
+        String safe = ResponseUtils.safe(value);
+        String token = "|" + key + "=";
+        int start = safe.indexOf(token);
+        if (start < 0) {
+            return "";
+        }
+        start += token.length();
+        int end = safe.indexOf("|", start);
+        return (end < 0 ? safe.substring(start) : safe.substring(start, end)).trim();
+    }
+
+    private List<String> stringList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream()
+                .map(item -> ResponseUtils.safe(item == null ? null : item.toString()))
+                .filter(StringUtils::hasText)
+                .limit(8)
+                .toList();
+    }
+
+    private boolean isGeneratedQuestion(QuestionBank question) {
+        return question != null && ResponseUtils.safe(question.getKnowledgePoint()).startsWith(GENERATED_ASSESSMENT_MARKER);
+    }
+
+    private List<PaperSectionSpec> generatedSectionSpecs(Assessment assessment) {
+        int target = generatedQuestionTarget(assessment);
+        List<PaperSectionSpec> base = paperSectionSpecs(assessment.getSubject());
+        if (base.isEmpty()) {
+            int choiceCount = Math.max(1, Math.min(5, target / 2));
+            int subjectiveCount = Math.max(1, target - choiceCount);
+            return List.of(
+                    new PaperSectionSpec("一、选择题", "AI按年级和知识范围实时生成。", 1, choiceCount, BigDecimal.ZERO),
+                    new PaperSectionSpec("二、综合题", "AI按年级和知识范围实时生成。", 4, subjectiveCount, BigDecimal.ZERO)
+            );
+        }
+        int[] counts = new int[base.size()];
+        int remaining = target;
+        for (int index = 0; index < base.size() && remaining > 0; index++) {
+            counts[index] = 1;
+            remaining--;
+        }
+        while (remaining > 0) {
+            boolean changed = false;
+            for (int index = 0; index < base.size() && remaining > 0; index++) {
+                if (counts[index] < base.get(index).count()) {
+                    counts[index]++;
+                    remaining--;
+                    changed = true;
+                }
+            }
+            if (!changed) {
+                break;
+            }
+        }
+        List<PaperSectionSpec> sections = new ArrayList<>();
+        for (int index = 0; index < base.size(); index++) {
+            if (counts[index] <= 0) {
+                continue;
+            }
+            PaperSectionSpec section = base.get(index);
+            sections.add(new PaperSectionSpec(section.title(), section.note(), section.questionType(), counts[index], BigDecimal.ZERO));
+        }
+        return sections;
+    }
+
+    private int generatedQuestionTarget(Assessment assessment) {
+        Integer type = assessment.getAssessmentType();
+        if (type != null && type == 3) {
+            return 18;
+        }
+        if (type != null && type == 1) {
+            return 8;
+        }
+        return 12;
+    }
+
+    private String normalizeGradeLevel(String gradeLevel) {
+        String safe = ResponseUtils.safe(gradeLevel);
+        return StringUtils.hasText(safe) ? safe : "九年级";
+    }
+
+    private String displayScope(String gradeLevel, String knowledgeScope) {
+        String grade = normalizeGradeLevel(gradeLevel);
+        String scope = ResponseUtils.safe(knowledgeScope);
+        return StringUtils.hasText(scope) ? grade + " · " + scope : grade + " · 综合知识";
+    }
+
     private List<SelectedQuestion> assessmentSelectedQuestions(Assessment assessment) {
+        List<QuestionBank> generated = generatedQuestions(assessment);
+        if (!generated.isEmpty()) {
+            return generated.stream()
+                    .map(question -> new SelectedQuestion(question, generatedSection(question, assessment)))
+                    .toList();
+        }
         int limit = questionLimit(assessment);
         List<QuestionBank> candidates = queryQuestions(assessment, true);
         boolean standardPaper = !paperSectionSpecs(assessment.getSubject()).isEmpty();
@@ -617,6 +878,9 @@ public class AssessmentController {
         BigDecimal totalScore = assessment.getTotalScore() == null || assessment.getTotalScore().compareTo(BigDecimal.ZERO) <= 0
                 ? defaultTotalScore(assessment.getSubject())
                 : assessment.getTotalScore();
+        if (selectedQuestions.stream().anyMatch(selected -> isGeneratedQuestion(selected.question()))) {
+            return equalScores(totalScore, selectedQuestions.size());
+        }
         List<PaperSectionSpec> sections = paperSectionSpecs(assessment.getSubject());
         return sections.isEmpty()
                 ? equalScores(totalScore, selectedQuestions.size())
@@ -841,7 +1105,7 @@ public class AssessmentController {
         data.put("assessmentId", answer.getAssessmentId());
         data.put("questionId", answer.getQuestionId());
         data.put("subject", question == null ? "" : ResponseUtils.safe(question.getSubject()));
-        data.put("knowledgePoint", question == null ? "" : ResponseUtils.safe(question.getKnowledgePoint()));
+        data.put("knowledgePoint", question == null ? "" : cleanKnowledgePoint(question.getKnowledgePoint()));
         data.put("questionType", question == null ? null : question.getQuestionType());
         data.put("questionTypeName", questionTypeName(question == null ? null : question.getQuestionType()));
         data.put("questionText", question == null ? "" : ResponseUtils.safe(question.getQuestionText()));
@@ -922,6 +1186,7 @@ public class AssessmentController {
                 .eq(strictDifficulty && assessment.getDifficulty() != null, QuestionBank::getDifficulty, assessment.getDifficulty())
                 .list();
         return questions.stream()
+                .filter(question -> !isGeneratedQuestion(question))
                 .filter(question -> scopes.isEmpty() || scopes.stream().anyMatch(scope -> knowledgeMatches(question, scope)))
                 .sorted(Comparator
                         .comparingInt((QuestionBank question) -> difficultyGap(question.getDifficulty(), assessment.getDifficulty()))
@@ -939,7 +1204,7 @@ public class AssessmentController {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("questionId", question.getQuestionId());
         data.put("subject", ResponseUtils.safe(question.getSubject()));
-        data.put("knowledgePoint", ResponseUtils.safe(question.getKnowledgePoint()));
+        data.put("knowledgePoint", cleanKnowledgePoint(question.getKnowledgePoint()));
         data.put("difficulty", question.getDifficulty());
         data.put("questionType", question.getQuestionType());
         data.put("questionText", ResponseUtils.safe(question.getQuestionText()));

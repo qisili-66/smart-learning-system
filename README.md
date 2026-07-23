@@ -11,6 +11,7 @@
 - 错题收集、复习计划、统计与导出
 - 学习资源检索与后台资源管理
 - 测评生成、在线答题、自动评分、报告和趋势分析
+  - 学生发起测评时按年级、学科和知识范围实时 AI 组卷；后台题库仍保留录入、导入和维护能力。
 - 管理端用户、题库、资源、AI 配置和系统状态管理
 
 ## 技术栈
@@ -53,9 +54,10 @@ mysql --default-character-set=utf8mb4 -u root -p < docs/sql/initial_schema.sql
 可选演示数据：
 
 ```bash
-mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sql/f4_question_bank_seed.sql
 mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sql/f6_f7_demo_learning_loop_seed.sql
 ```
+
+后台题库演示数据仍可按需导入，但学生端测评不再依赖预置题库；创建测评时会调用 AI 服务按年级和知识范围生成本次专用试卷题目。
 
 ### 2. 启动后端
 

@@ -151,6 +151,10 @@ public class AiService {
         return postJsonForMap("learning_path", "/study-plan/path", request);
     }
 
+    public Map<String, Object> generateAssessmentPaper(Map<String, Object> request) {
+        return postJsonForMap("generate_assessment_paper", "/assessment/generate-paper", request);
+    }
+
     private Map<String, Object> postJsonForMap(String operation, String path, Map<String, Object> request) {
         Result<?> result = exchangeForResult(operation, path, new HttpEntity<>(request, jsonHeaders()));
         if (result != null && Constants.CODE_SUCCESS.equals(result.getCode()) && result.getData() instanceof Map<?, ?> raw) {

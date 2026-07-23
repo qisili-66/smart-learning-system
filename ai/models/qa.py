@@ -49,3 +49,14 @@ class LearningPathRequest(BaseModel):
     recentAssessments: List[Dict[str, Any]] = Field(default_factory=list, description="最近测评")
     resources: List[Dict[str, Any]] = Field(default_factory=list, description="可用资源")
     provider: Optional[str] = Field(default=None, description="兼容旧请求字段；服务端统一调用 OpenAI 兼容 API")
+
+
+class AssessmentPaperRequest(BaseModel):
+    subject: str = Field(default="", description="学科")
+    gradeLevel: str = Field(default="九年级", description="年级")
+    knowledgeScope: str = Field(default="", description="知识范围")
+    difficulty: int = Field(default=2, ge=1, le=3, description="难度：1基础 2中等 3提升")
+    assessmentType: int = Field(default=2, description="测评模式")
+    totalScore: float = Field(default=100.0, ge=1, description="试卷总分")
+    questionCount: int = Field(default=8, ge=1, le=45, description="题目数量")
+    sections: List[Dict[str, Any]] = Field(default_factory=list, description="试卷大题结构")

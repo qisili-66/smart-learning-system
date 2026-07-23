@@ -199,6 +199,34 @@ class LearningQAAgent:
 
         return self._fallback_learning_path(request, "api_key_missing")
 
+    def generate_assessment_paper(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = self._build_assessment_paper_prompt(request)
+        if settings.EXTERNAL_LLM_API_KEY:
+            try:
+                content = self._invoke_external_chat_messages(
+                    [
+                        SystemMessage(
+                            content=(
+                                "你是广东中小学测评命题 Agent。你会参考公开教材要求、"
+                                "公开考试题型和真实卷面风格，生成原创题。只输出 JSON，"
+                                "不要输出 Markdown、代码块或多余解释。"
+                            )
+                        ),
+                        HumanMessage(content=prompt),
+                    ],
+                    max_tokens=max(settings.AGENT_MAX_TOKENS, 4200),
+                )
+                parsed = self._parse_score_json(content)
+                if parsed:
+                    normalized = self._normalize_assessment_paper(parsed, request, self._active_provider(), self._active_model())
+                    if normalized.get("questions"):
+                        return normalized
+            except Exception:
+                logger.warning("AI assessment paper generation failed", exc_info=True)
+                return self._fallback_assessment_paper(request, "external_failed")
+
+        return self._fallback_assessment_paper(request, "api_key_missing")
+
     def _build_input(self, question: str, subject: str, requires_confirmation: bool, confirm_answer: bool) -> str:
         prefixes: List[str] = []
         if subject:
@@ -395,6 +423,160 @@ class LearningQAAgent:
                 json.dumps(context, ensure_ascii=False),
             ]
         )
+
+    def _build_assessment_paper_prompt(self, request: Dict[str, Any]) -> str:
+        context = {
+            "subject": request.get("subject") or "数学",
+            "gradeLevel": request.get("gradeLevel") or "九年级",
+            "knowledgeScope": request.get("knowledgeScope") or "综合知识",
+            "difficulty": request.get("difficulty") or 2,
+            "assessmentType": request.get("assessmentType") or 2,
+            "totalScore": request.get("totalScore") or 100,
+            "questionCount": request.get("questionCount") or 8,
+            "sections": request.get("sections") or [],
+        }
+        return "\n".join(
+            [
+                "请生成一份原创测评卷，风格参考广东省初中学业水平考试卷面：标题清楚、分大题、题干严谨、选择项整齐。",
+                "可以参考公开教材知识要求和常见考试题型，但不得照搬真题原文；不要输出来源链接，不要生成图片文件。",
+                "数学/物理等需要图形时，用文字描述或 ASCII/坐标说明表达图形；英语可生成语篇、完形、阅读类短文本；语文可生成阅读材料和作文题。",
+                "题目必须贴合年级、学科、知识范围和难度；每题给出参考答案、解析、评分要点。",
+                "题型 questionType 只能使用：1单选、2多选、3填空、4主观/解答。options 是数组，选择题必须有 3-4 个选项，非选择题为空数组。",
+                "输出 JSON 格式：" ,
+                '{"paperTitle":"2026年广东省初中学业水平模拟测评 数学","instructions":["本试卷为AI原创模拟测评。"],"questions":[{"sectionTitle":"一、单项选择题","knowledgePoint":"一次函数","difficulty":2,"questionType":1,"questionText":"题干","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","analysis":"解析","scoringPoints":["评分要点"]}]}',
+                "上下文：",
+                json.dumps(context, ensure_ascii=False),
+            ]
+        )
+
+    def _normalize_assessment_paper(
+        self,
+        parsed: Dict[str, Any],
+        request: Dict[str, Any],
+        provider: str,
+        model: str,
+    ) -> Dict[str, Any]:
+        raw_questions = parsed.get("questions") if isinstance(parsed.get("questions"), list) else []
+        limit = max(1, min(45, int(self._safe_float(request.get("questionCount"), 8))))
+        subject = str(request.get("subject") or "数学").strip()
+        difficulty = max(1, min(3, int(self._safe_float(request.get("difficulty"), 2))))
+        questions: List[Dict[str, Any]] = []
+        for item in raw_questions[:limit]:
+            if not isinstance(item, dict):
+                continue
+            question_text = str(item.get("questionText") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if not question_text or not answer:
+                continue
+            question_type = max(1, min(4, int(self._safe_float(item.get("questionType"), 1))))
+            options = self._as_string_list(item.get("options"))
+            if question_type in {1, 2} and len(options) < 2:
+                options = ["A. 正确", "B. 错误", "C. 无法判断", "D. 以上都不对"]
+                answer = "A"
+            if question_type not in {1, 2}:
+                options = []
+            questions.append(
+                {
+                    "sectionTitle": str(item.get("sectionTitle") or "").strip(),
+                    "subject": subject,
+                    "knowledgePoint": str(item.get("knowledgePoint") or request.get("knowledgeScope") or "综合知识").strip(),
+                    "difficulty": difficulty,
+                    "questionType": question_type,
+                    "questionText": question_text,
+                    "options": options[:6],
+                    "answer": answer,
+                    "analysis": str(item.get("analysis") or "参考解析：根据题干条件和对应知识点逐步判断。 ").strip(),
+                    "scoringPoints": self._as_string_list(item.get("scoringPoints"))[:8],
+                }
+            )
+        if not questions:
+            return self._fallback_assessment_paper(request, f"{provider}_empty")
+        return {
+            "provider": provider,
+            "model": model,
+            "fallback": False,
+            "failureCategory": "",
+            "errorCode": "",
+            "paperTitle": str(parsed.get("paperTitle") or self._default_paper_title(request)).strip(),
+            "instructions": self._as_string_list(parsed.get("instructions"))[:6],
+            "questions": questions,
+        }
+
+    def _fallback_assessment_paper(self, request: Dict[str, Any], mode: str) -> Dict[str, Any]:
+        subject = str(request.get("subject") or "数学").strip()
+        grade = str(request.get("gradeLevel") or "九年级").strip()
+        scope = str(request.get("knowledgeScope") or "综合知识").strip()
+        difficulty = max(1, min(3, int(self._safe_float(request.get("difficulty"), 2))))
+        limit = max(1, min(45, int(self._safe_float(request.get("questionCount"), 8))))
+        raw_sections = request.get("sections") if isinstance(request.get("sections"), list) else []
+        sections = [item for item in raw_sections if isinstance(item, dict)]
+        if not sections:
+            sections = [{"title": "一、选择题", "questionType": 1, "count": min(limit, 5)}, {"title": "二、综合题", "questionType": 4, "count": max(0, limit - 5)}]
+        questions: List[Dict[str, Any]] = []
+        for section in sections:
+            count = int(self._safe_float(section.get("count"), 1))
+            question_type = max(1, min(4, int(self._safe_float(section.get("questionType"), 1))))
+            for _ in range(max(0, count)):
+                if len(questions) >= limit:
+                    break
+                number = len(questions) + 1
+                questions.append(self._fallback_question(subject, grade, scope, difficulty, question_type, str(section.get("title") or "测评题"), number))
+        return {
+            "provider": mode,
+            "model": settings.EXTERNAL_LLM_MODEL,
+            "fallback": True,
+            "failureCategory": mode,
+            "errorCode": "ASSESSMENT_PAPER_FALLBACK",
+            "paperTitle": self._default_paper_title(request),
+            "instructions": ["本试卷由 AI 根据年级和知识范围实时生成。", "题目为原创模拟测评，提交后自动生成报告。"],
+            "questions": questions,
+        }
+
+    def _fallback_question(self, subject: str, grade: str, scope: str, difficulty: int, question_type: int, section_title: str, number: int) -> Dict[str, Any]:
+        stem = f"{grade}{subject}{scope}第{number}题：请根据所学知识完成本题。"
+        if question_type in {1, 2}:
+            return {
+                "sectionTitle": section_title,
+                "subject": subject,
+                "knowledgePoint": scope,
+                "difficulty": difficulty,
+                "questionType": question_type,
+                "questionText": stem + "下列说法最符合题意的是（ ）。",
+                "options": ["A. 能正确体现核心概念", "B. 与题干条件相反", "C. 忽略了限制条件", "D. 与本知识点无关"],
+                "answer": "A",
+                "analysis": "A 项符合题干中的核心概念和条件，其余选项存在概念或条件错误。 ",
+                "scoringPoints": ["能识别核心概念", "能排除干扰选项"],
+            }
+        if question_type == 3:
+            return {
+                "sectionTitle": section_title,
+                "subject": subject,
+                "knowledgePoint": scope,
+                "difficulty": difficulty,
+                "questionType": 3,
+                "questionText": stem + "请写出本知识点中最关键的结论或方法。 ",
+                "options": [],
+                "answer": scope,
+                "analysis": "围绕题干指定知识范围作答，关键词完整即可。 ",
+                "scoringPoints": ["关键词准确", "表达完整"],
+            }
+        return {
+            "sectionTitle": section_title,
+            "subject": subject,
+            "knowledgePoint": scope,
+            "difficulty": difficulty,
+            "questionType": 4,
+            "questionText": stem + "请结合概念、步骤和结论进行完整解答。 ",
+            "options": [],
+            "answer": f"围绕{scope}说明概念、列出关键步骤，并得到合理结论。 ",
+            "analysis": "主观题按步骤、关键概念和结论完整性评分。 ",
+            "scoringPoints": ["概念准确", "步骤清晰", "结论合理"],
+        }
+
+    def _default_paper_title(self, request: Dict[str, Any]) -> str:
+        subject = str(request.get("subject") or "综合").strip()
+        grade = str(request.get("gradeLevel") or "九年级").strip()
+        return f"{grade}{subject}AI原创模拟测评"
 
     def _normalize_learning_path(
         self,

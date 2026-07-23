@@ -106,7 +106,7 @@ async function loadAssessment() {
       return
     }
     if (!questions.value.length) {
-      ElMessage.warning('当前条件没有匹配题目，请管理员先在题库管理中新增题目')
+      ElMessage.warning('当前测评暂未生成题目，请返回测评主页重新生成')
     } else {
       activateQuestion(questions.value[0].questionId)
     }
@@ -249,7 +249,7 @@ onBeforeUnmount(() => {
       </div>
 
       <el-empty v-else description="暂无题目">
-        <span class="muted">请返回测评主页重新生成，或让管理员补充对应题库。</span>
+        <span class="muted">请返回测评主页重新生成，系统会重新调用 AI 组卷。</span>
       </el-empty>
     </section>
   </div>

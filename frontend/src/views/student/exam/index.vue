@@ -30,9 +30,12 @@ const filters = reactive({
 const form = reactive({
   assessmentType: 2,
   subject: '数学',
+  gradeLevel: '九年级',
   knowledgeScope: '',
   difficulty: 1
 })
+
+const GRADE_LEVELS = ['七年级', '八年级', '九年级']
 
 const historyList = computed(() => pageList(history.value))
 const stats = computed(() => {
@@ -170,9 +173,9 @@ onMounted(async () => {
         <div class="panel-head">
           <div>
             <h2>发起测评</h2>
-            <p>生成后会跳转到独立答题页。</p>
+            <p>按年级和知识范围实时生成原创测评卷。</p>
           </div>
-          <el-tag type="info">题目来自后台题库</el-tag>
+          <el-tag type="info">AI 实时组卷</el-tag>
         </div>
         <el-form label-position="top" :model="form">
           <div class="form-grid">
@@ -193,11 +196,18 @@ onMounted(async () => {
             </el-form-item>
           </div>
           <div class="form-grid">
+            <el-form-item label="年级">
+              <el-select v-model="form.gradeLevel" class="full">
+                <el-option v-for="grade in GRADE_LEVELS" :key="grade" :label="grade" :value="grade" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="难度">
               <el-select v-model="form.difficulty" class="full">
                 <el-option v-for="(label, value) in DIFFICULTY" :key="value" :label="label" :value="Number(value)" />
               </el-select>
             </el-form-item>
+          </div>
+          <div class="form-grid single">
             <el-form-item label="知识点范围">
               <el-input v-model.trim="form.knowledgeScope" placeholder="如：一次函数，可用逗号分隔多个知识点" />
             </el-form-item>
@@ -323,6 +333,12 @@ onMounted(async () => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
+
+.form-grid.single {
+  grid-template-columns: 1fr;
+}
+
+
 
 .full {
   width: 100%;

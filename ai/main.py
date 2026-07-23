@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
 from models.common import Result
-from models.qa import LearningPathRequest, SubjectiveScoreRequest, TextQARequest
+from models.qa import AssessmentPaperRequest, LearningPathRequest, SubjectiveScoreRequest, TextQARequest
 from services.agent.qa_agent import qa_agent
 from services.ocr_service import ocr_service
 from utils.common_utils import generate_uuid
@@ -96,6 +96,20 @@ def study_plan_path(request: LearningPathRequest):
         return Result(data=result)
     except Exception as exc:
         return Result(code=500, message=f"学习路径生成异常：{exc}", data=None)
+
+
+@app.post("/assessment/generate-paper", response_model=Result, summary="AI按年级和知识范围生成测评试卷")
+def generate_assessment_paper(request: AssessmentPaperRequest):
+    started = time.perf_counter()
+    try:
+        result = qa_agent.generate_assessment_paper(request.model_dump())
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        result["latencyMs"] = latency_ms
+        result.setdefault("operation", "generate_assessment_paper")
+        result.setdefault("endpoint", "/assessment/generate-paper")
+        return Result(data=result)
+    except Exception as exc:
+        return Result(code=500, message=f"测评试卷生成异常：{exc}", data=None)
 
 
 @app.post("/qa/image", response_model=Result, summary="图片OCR智能答疑")
