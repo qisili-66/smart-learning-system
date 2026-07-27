@@ -232,12 +232,14 @@ public class AssessmentController {
     }
 
     @DeleteMapping("/{assessmentId}")
+    @Transactional
     public Result<Map<String, Object>> delete(@PathVariable Long assessmentId) {
         Assessment assessment = getOwnedAssessment(assessmentId);
         assessmentAnswerService.remove(new LambdaQueryWrapper<AssessmentAnswer>()
                 .eq(AssessmentAnswer::getAssessmentId, assessment.getAssessmentId())
                 .eq(AssessmentAnswer::getUserId, assessment.getUserId()));
         assessmentService.removeById(assessment.getAssessmentId());
+        removeGeneratedAssessmentQuestions(List.of(assessment));
         userProfileService.refreshAfterLearningEvent(assessment.getUserId());
         return Result.success(Map.of(
                 "deleted", 1,
@@ -246,6 +248,7 @@ public class AssessmentController {
     }
 
     @DeleteMapping
+    @Transactional
     public Result<Map<String, Object>> clear(@RequestParam(required = false) String subject) {
         Long userId = SecurityUtils.currentUserId();
         List<Assessment> assessments = assessmentService.lambdaQuery()
@@ -261,6 +264,7 @@ public class AssessmentController {
                     .eq(AssessmentAnswer::getUserId, userId)
                     .in(AssessmentAnswer::getAssessmentId, ids));
             assessmentService.removeByIds(ids);
+            removeGeneratedAssessmentQuestions(assessments);
             userProfileService.refreshAfterLearningEvent(userId);
         }
         return Result.success(Map.of(
@@ -477,7 +481,9 @@ public class AssessmentController {
         QuestionBank question = new QuestionBank();
         question.setSubject(ResponseUtils.safe(assessment.getSubject()));
         question.setKnowledgePoint(generatedKnowledgePoint(assessment, sectionTitle, knowledgePoint));
-        question.setDifficulty(toInteger(item.get("difficulty")) == null ? assessment.getDifficulty() : toInteger(item.get("difficulty")));
+        Integer itemDifficulty = toInteger(item.get("difficulty"));
+        Integer assessmentDifficulty = assessment.getDifficulty();
+        question.setDifficulty(itemDifficulty == null ? (assessmentDifficulty == null ? 2 : assessmentDifficulty) : itemDifficulty);
         question.setQuestionType(toInteger(item.get("questionType")) == null ? 1 : toInteger(item.get("questionType")));
         question.setQuestionText(ResponseUtils.safe(item.get("questionText") == null ? null : item.get("questionText").toString()));
         question.setOptions(String.join("|", stringList(item.get("options"))));
@@ -501,6 +507,19 @@ public class AssessmentController {
                     .list();
         } catch (RuntimeException ignored) {
             return List.of();
+        }
+    }
+
+    private void removeGeneratedAssessmentQuestions(List<Assessment> assessments) {
+        List<Long> generatedQuestionIds = assessments.stream()
+                .filter(Objects::nonNull)
+                .flatMap(assessment -> generatedQuestions(assessment).stream())
+                .map(QuestionBank::getQuestionId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (!generatedQuestionIds.isEmpty()) {
+            questionBankService.removeByIds(generatedQuestionIds);
         }
     }
 

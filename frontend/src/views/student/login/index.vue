@@ -35,7 +35,7 @@ const registerForm = reactive({
 
 const messages = {
   zh: {
-    brand: '智慧学习辅助系统',
+    brand: 'Smart Study Agent',
     enLabel: 'English',
     login: '登录',
     register: '注册',

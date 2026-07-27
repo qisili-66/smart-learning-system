@@ -1,13 +1,12 @@
 import json
 import logging
 import re
-import urllib.error
-import urllib.request
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from config.settings import settings
+from services.llm_client import LlmCallError, OpenAICompatibleClient
 from services.agent.memory import ConversationMemoryManager
 from agent_tools.calculator_tool import math_calculate
 from agent_tools.ocr_tool import ocr_recognize
@@ -33,7 +32,22 @@ SYSTEM_PROMPT = """
 class LearningQAAgent:
     def __init__(self):
         self.tools = [math_calculate, ocr_recognize]
-        self.memory = ConversationMemoryManager(settings.MAX_HISTORY_TURNS)
+        self.memory = ConversationMemoryManager(
+            settings.MAX_HISTORY_TURNS,
+            settings.MEMORY_MAX_SESSIONS,
+            settings.MEMORY_TTL_SECONDS,
+        )
+        self.llm_client = OpenAICompatibleClient(
+            base_url=settings.EXTERNAL_LLM_BASE_URL,
+            model=settings.EXTERNAL_LLM_MODEL,
+            api_key=settings.EXTERNAL_LLM_API_KEY,
+            timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+            max_retries=settings.LLM_MAX_RETRIES,
+            max_concurrency=settings.LLM_MAX_CONCURRENCY,
+            queue_timeout_seconds=settings.LLM_QUEUE_TIMEOUT_SECONDS,
+            circuit_failure_threshold=settings.LLM_CIRCUIT_FAILURE_THRESHOLD,
+            circuit_reset_seconds=settings.LLM_CIRCUIT_RESET_SECONDS,
+        )
 
     def ask(
         self,
@@ -86,7 +100,12 @@ class LearningQAAgent:
             )
 
         input_messages = [SystemMessage(content=SYSTEM_PROMPT), *base_messages, HumanMessage(content=agent_input)]
-        answer = self._invoke_llm(input_messages)
+        try:
+            answer = self._invoke_llm(input_messages)
+        except LlmCallError as exc:
+            answer = self._fallback_qa_answer(clean_subject)
+            self.memory.set_messages(session_id, [*base_messages, HumanMessage(content=agent_input), AIMessage(content=answer)])
+            return self._fallback_qa_payload(session_id, answer, clean_subject, tool_calls, exc)
 
         self.memory.set_messages(session_id, [*base_messages, HumanMessage(content=agent_input), AIMessage(content=answer)])
 
@@ -157,24 +176,26 @@ class LearningQAAgent:
                         )
                     ),
                     HumanMessage(content=prompt),
-                ]
+                ],
+                operation="subjective_score",
             )
             parsed = self._parse_score_json(raw_answer)
             if parsed:
                 return self._score_payload_from_model(parsed, points, max_score_value)
-        except Exception as exc:
+        except LlmCallError as exc:
             logger.warning(
-                "AI subjective scoring call failed model=%s category=call_error",
+                "AI subjective scoring fallback model=%s category=%s errorCode=%s",
                 self._active_model(),
-                exc_info=True,
+                exc.category,
+                exc.code,
             )
             return self._heuristic_subjective_score(
                 reference_answer,
                 clean_answer,
                 points,
                 max_score_value,
-                failure_category="call_error",
-                error_code="LLM_API_CALL_FAILED",
+                failure_category=exc.category,
+                error_code=exc.code,
             )
 
         return self._heuristic_subjective_score(
@@ -190,14 +211,14 @@ class LearningQAAgent:
         prompt = self._build_learning_path_prompt(request)
         if settings.EXTERNAL_LLM_API_KEY:
             try:
-                content = self._invoke_external_chat(prompt)
+                content = self._invoke_external_chat(prompt, operation="learning_path")
                 parsed = self._parse_score_json(content)
                 if parsed:
                     return self._normalize_learning_path(parsed, request, self._active_provider(), self._active_model())
-            except Exception:
-                return self._fallback_learning_path(request, "external_failed")
+            except LlmCallError as exc:
+                return self._fallback_learning_path(request, exc.category, exc.code)
 
-        return self._fallback_learning_path(request, "api_key_missing")
+        return self._fallback_learning_path(request, "configuration", "LLM_API_KEY_MISSING")
 
     def generate_assessment_paper(self, request: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_assessment_paper_prompt(request)
@@ -215,17 +236,18 @@ class LearningQAAgent:
                         HumanMessage(content=prompt),
                     ],
                     max_tokens=max(settings.AGENT_MAX_TOKENS, 4200),
+                    operation="generate_assessment_paper",
                 )
                 parsed = self._parse_score_json(content)
                 if parsed:
                     normalized = self._normalize_assessment_paper(parsed, request, self._active_provider(), self._active_model())
                     if normalized.get("questions"):
                         return normalized
-            except Exception:
-                logger.warning("AI assessment paper generation failed", exc_info=True)
-                return self._fallback_assessment_paper(request, "external_failed")
+            except LlmCallError as exc:
+                logger.warning("AI assessment paper fallback category=%s errorCode=%s", exc.category, exc.code)
+                return self._fallback_assessment_paper(request, exc.category, exc.code)
 
-        return self._fallback_assessment_paper(request, "api_key_missing")
+        return self._fallback_assessment_paper(request, "configuration", "LLM_API_KEY_MISSING")
 
     def _build_input(self, question: str, subject: str, requires_confirmation: bool, confirm_answer: bool) -> str:
         prefixes: List[str] = []
@@ -242,8 +264,8 @@ class LearningQAAgent:
                 return self._content_to_text(message.content)
         return ""
 
-    def _invoke_llm(self, messages: List[BaseMessage]) -> str:
-        return self._invoke_external_chat_messages(messages)
+    def _invoke_llm(self, messages: List[BaseMessage], operation: str = "qa_text") -> str:
+        return self._invoke_external_chat_messages(messages, operation=operation)
 
     def _chat_message(self, message: BaseMessage) -> Dict[str, str]:
         if isinstance(message, SystemMessage):
@@ -360,41 +382,63 @@ class LearningQAAgent:
             ]
         )
 
-    def _invoke_external_chat(self, prompt: str) -> str:
+    def _invoke_external_chat(self, prompt: str, operation: str) -> str:
         messages = [
             SystemMessage(content="你是学习路径规划 Agent。只输出 JSON，不要输出 Markdown 或解释文字。"),
             HumanMessage(content=prompt),
         ]
-        return self._invoke_external_chat_messages(messages, max_tokens=1800)
+        return self._invoke_external_chat_messages(messages, max_tokens=1800, operation=operation)
 
-    def _invoke_external_chat_messages(self, messages: List[BaseMessage], max_tokens: Optional[int] = None) -> str:
-        if not settings.EXTERNAL_LLM_API_KEY:
-            raise RuntimeError("EXTERNAL_LLM_API_KEY is not configured")
-        url = settings.EXTERNAL_LLM_BASE_URL.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": settings.EXTERNAL_LLM_MODEL,
-            "messages": [self._chat_message(message) for message in messages],
-            "temperature": settings.AGENT_TEMPERATURE,
-            "max_tokens": max_tokens or settings.AGENT_MAX_TOKENS,
-        }
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {settings.EXTERNAL_LLM_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+    def _invoke_external_chat_messages(
+        self,
+        messages: List[BaseMessage],
+        max_tokens: Optional[int] = None,
+        operation: str = "qa_text",
+    ) -> str:
+        return self.llm_client.chat(
+            messages=[self._chat_message(message) for message in messages],
+            temperature=settings.AGENT_TEMPERATURE,
+            max_tokens=max_tokens or settings.AGENT_MAX_TOKENS,
+            operation=operation,
         )
-        with urllib.request.urlopen(request, timeout=90) as response:
-            raw = response.read().decode("utf-8", errors="ignore")
-        parsed = json.loads(raw)
-        choices = parsed.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "")
+
+    def _fallback_qa_answer(self, subject: str) -> str:
+        point = subject or "当前知识点"
+        return "\n".join(
+            [
+                "AI 服务暂时不可用，已切换到学习引导模式。",
+                f"请先围绕{point}整理题目中的已知条件、未知量和对应公式或概念。",
+                "建议步骤：1. 圈出关键信息；2. 写出可用定义或公式；3. 分步推导并检查单位、符号和条件。",
+                "稍后可重新提交问题以获取完整讲解。",
+            ]
+        )
+
+    def _fallback_qa_payload(
+        self,
+        session_id: str,
+        answer: str,
+        subject: str,
+        tool_calls: List[Dict[str, Any]],
+        error: LlmCallError,
+    ) -> Dict[str, Any]:
+        return {
+            "conversationId": session_id,
+            "answerId": generate_uuid(),
+            "answer": answer,
+            "knowledgePoint": subject or "通用知识点",
+            "steps": self._extract_steps(answer),
+            "extendTips": "系统已保留本次问题，可在服务恢复后重新提交。",
+            "usedTools": [item["toolName"] for item in tool_calls if item.get("toolName")],
+            "toolCalls": tool_calls,
+            "memory": self.memory.stats(session_id),
+            "model": self._active_model(),
+            "provider": "rule_fallback",
+            "fallback": True,
+            "failureCategory": error.category,
+            "errorCode": error.code,
+            "requiresConfirmation": False,
+            "confirmedAnswer": False,
+        }
 
     def _build_learning_path_prompt(self, request: Dict[str, Any]) -> str:
         allowed = "diagnostic_test, practice, wrong_review, resource_study, stage_test"
@@ -502,7 +546,12 @@ class LearningQAAgent:
             "questions": questions,
         }
 
-    def _fallback_assessment_paper(self, request: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    def _fallback_assessment_paper(
+        self,
+        request: Dict[str, Any],
+        mode: str,
+        error_code: str = "ASSESSMENT_PAPER_FALLBACK",
+    ) -> Dict[str, Any]:
         subject = str(request.get("subject") or "数学").strip()
         grade = str(request.get("gradeLevel") or "九年级").strip()
         scope = str(request.get("knowledgeScope") or "综合知识").strip()
@@ -526,7 +575,7 @@ class LearningQAAgent:
             "model": settings.EXTERNAL_LLM_MODEL,
             "fallback": True,
             "failureCategory": mode,
-            "errorCode": "ASSESSMENT_PAPER_FALLBACK",
+            "errorCode": error_code,
             "paperTitle": self._default_paper_title(request),
             "instructions": ["本试卷由 AI 根据年级和知识范围实时生成。", "题目为原创模拟测评，提交后自动生成报告。"],
             "questions": questions,
@@ -619,7 +668,12 @@ class LearningQAAgent:
             "steps": steps,
         }
 
-    def _fallback_learning_path(self, request: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    def _fallback_learning_path(
+        self,
+        request: Dict[str, Any],
+        mode: str,
+        error_code: str = "LEARNING_PATH_FALLBACK",
+    ) -> Dict[str, Any]:
         points = self._as_string_list(request.get("weakPoints"))
         if not points:
             points = [self._first_target_point(str(request.get("targetDesc") or "基础知识"))]
@@ -635,6 +689,9 @@ class LearningQAAgent:
         return {
             "provider": mode,
             "model": settings.EXTERNAL_LLM_MODEL,
+            "fallback": True,
+            "failureCategory": mode,
+            "errorCode": error_code,
             "planSummary": "根据目标、画像和薄弱点生成诊断-练习-复盘-资源-测评闭环。",
             "steps": [
                 {

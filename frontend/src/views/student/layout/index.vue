@@ -12,7 +12,7 @@ const collapsed = ref(false)
 const moreOpen = ref(false)
 
 const text = {
-  brand: '智慧学习辅助系统',
+  brand: 'Smart Study Agent',
   shortBrand: '智慧学习',
   learning: '学习',
   training: '训练',

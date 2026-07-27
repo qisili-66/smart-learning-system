@@ -36,8 +36,8 @@ mybatis-plus:
 knife4j:
   enable: ${KNIFE4J_ENABLE:true}
   openapi:
-    title: 智慧学习辅助系统接口文档
-    description: 基于 AI Agent 的智慧学习辅助系统 API
+    title: Smart Study Agent API
+    description: Smart Study Agent API
     version: v1.0
     group:
       default:

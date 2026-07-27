@@ -53,7 +53,7 @@ onMounted(loadHome)
   <div class="home-page" v-loading="loading">
     <section class="dashboard-head panel-block">
       <div>
-        <p>基于 AI Agent 的智慧学习辅助系统</p>
+        <p>Smart Study Agent</p>
         <h1>{{ auth.displayName }}，今天先完成一件最重要的事</h1>
         <span>{{ profileAdvice[0] || '完成一次测评或错题复盘后，系统会生成更准确的学习建议。' }}</span>
       </div>

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from config.settings import settings
 from models.common import Result
@@ -55,8 +56,9 @@ def text_qa(request: TextQARequest):
         return Result(data=result)
     except ValueError as exc:
         return Result(code=400, message=str(exc), data=None)
-    except Exception as exc:
-        return Result(code=500, message=f"答疑服务异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI text question failed")
+        return Result(code=500, message="答疑服务暂时不可用，请稍后重试", data=None)
 
 
 @app.post("/assessment/subjective-score", response_model=Result, summary="AI主观题语义评分")
@@ -85,8 +87,9 @@ def subjective_score(request: SubjectiveScoreRequest):
             result.get("failureCategory", ""),
         )
         return Result(data=result)
-    except Exception as exc:
-        return Result(code=500, message=f"主观题评分异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI subjective score request failed")
+        return Result(code=500, message="主观题评分服务暂时不可用，请稍后重试", data=None)
 
 
 @app.post("/study-plan/path", response_model=Result, summary="AI生成可执行学习路径")
@@ -94,8 +97,9 @@ def study_plan_path(request: LearningPathRequest):
     try:
         result = qa_agent.generate_learning_path(request.model_dump())
         return Result(data=result)
-    except Exception as exc:
-        return Result(code=500, message=f"学习路径生成异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI learning path request failed")
+        return Result(code=500, message="学习路径生成服务暂时不可用，请稍后重试", data=None)
 
 
 @app.post("/assessment/generate-paper", response_model=Result, summary="AI按年级和知识范围生成测评试卷")
@@ -108,8 +112,9 @@ def generate_assessment_paper(request: AssessmentPaperRequest):
         result.setdefault("operation", "generate_assessment_paper")
         result.setdefault("endpoint", "/assessment/generate-paper")
         return Result(data=result)
-    except Exception as exc:
-        return Result(code=500, message=f"测评试卷生成异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI assessment paper request failed")
+        return Result(code=500, message="测评试卷生成服务暂时不可用，请稍后重试", data=None)
 
 
 @app.post("/qa/image", response_model=Result, summary="图片OCR智能答疑")
@@ -122,7 +127,7 @@ async def image_qa(
 ):
     try:
         image_bytes = await file.read()
-        ocr_result = ocr_service.recognize_image(image_bytes, conversationId, subject)
+        ocr_result = await run_in_threadpool(ocr_service.recognize_image, image_bytes, conversationId, subject)
         ocr_text = ocr_result["ocrText"].strip()
         session_id = ocr_result["conversationId"]
 
@@ -144,7 +149,8 @@ async def image_qa(
                 },
             )
 
-        answer_result = qa_agent.ask(
+        answer_result = await run_in_threadpool(
+            qa_agent.ask,
             question=ocr_text,
             conversation_id=session_id,
             subject=subject,
@@ -165,8 +171,9 @@ async def image_qa(
         )
     except ValueError as exc:
         return Result(code=400, message=str(exc), data=None)
-    except Exception as exc:
-        return Result(code=500, message=f"图片答疑异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI image question failed")
+        return Result(code=500, message="图片答疑服务暂时不可用，请稍后重试", data=None)
 
 
 @app.post("/qa/voice", response_model=Result, summary="语音ASR智能答疑")
@@ -205,7 +212,8 @@ async def voice_qa(
                 }
             )
 
-        answer_result = qa_agent.ask(
+        answer_result = await run_in_threadpool(
+            qa_agent.ask,
             question=question,
             conversation_id=session_id,
             subject=subject,
@@ -222,8 +230,9 @@ async def voice_qa(
         )
     except ValueError as exc:
         return Result(code=400, message=str(exc), data=None)
-    except Exception as exc:
-        return Result(code=500, message=f"语音答疑异常：{exc}", data=None)
+    except Exception:
+        logger.exception("AI voice question failed")
+        return Result(code=500, message="语音答疑服务暂时不可用，请稍后重试", data=None)
 
 
 def parse_history(raw_history: Optional[str]) -> List[Dict[str, str]]:
