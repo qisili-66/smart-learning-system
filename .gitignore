@@ -1,5 +1,6 @@
 # Runtime and editor files
 .vscode/
+.idea/
 /auth.json
 /mcp-shell.log
 /work.md
@@ -47,3 +48,4 @@ backend/exports/
 .DS_Store
 Thumbs.db
 /%SystemDrive%/
+deploy/tencent-light-server/
