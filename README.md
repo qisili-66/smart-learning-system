@@ -67,16 +67,16 @@ Smart Study Agent 是一个面向学生的智能学习辅助系统，提供智�
 创建 `smart_learning_system` 数据库，然后执行：
 
 ```bash
-mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sql/initial_schema.sql
+mysql --default-character-set=utf8mb4 -u root -p < docs/sql/01_schema.sql
 ```
 
 可选演示数据：
 
 ```bash
-mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sql/f6_f7_demo_learning_loop_seed.sql
+mysql --default-character-set=utf8mb4 -u root -p smart_learning_system < docs/sql/02_seed_data.sql
 ```
 
-可按需继续导入 `docs/sql/` 下的题库、资源和测评演示数据。
+`02_seed_data.sql` 包含管理员账号、初中题库、学习资源、学习闭环和主观题复核演示数据。
 
 ### 2. 启动后端
 
